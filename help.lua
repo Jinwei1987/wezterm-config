@@ -55,6 +55,51 @@ local shortcuts = {
   { keys = "CMD+SHIFT+M",        desc = "This help — search all shortcuts" },
 }
 
+-- Captured in apply_to_config so find_action can walk config.keys at runtime
+-- to find the registered action matching a shortcut id like "CMD+SHIFT+N".
+local stored_config
+
+local function normalize_key(k)
+  if #k == 1 then return k:lower() end
+  return k
+end
+
+local MOD_ORDER = { CMD = 1, CTRL = 2, ALT = 3, SHIFT = 4, SUPER = 1 }
+
+local function normalize_mods(list)
+  table.sort(list, function(a, b)
+    return (MOD_ORDER[a] or 99) < (MOD_ORDER[b] or 99)
+  end)
+  return table.concat(list, "|")
+end
+
+local function parse_shortcut(id)
+  local parts = {}
+  for p in id:gmatch("[^+]+") do table.insert(parts, p) end
+  if #parts < 2 then return nil end
+  local key = normalize_key(parts[#parts])
+  local mods = {}
+  for i = 1, #parts - 1 do table.insert(mods, parts[i]:upper()) end
+  return key, normalize_mods(mods)
+end
+
+local function find_action(id)
+  if not stored_config or not stored_config.keys then return nil end
+  local target_key, target_mods = parse_shortcut(id)
+  if not target_key then return nil end
+  for _, entry in ipairs(stored_config.keys) do
+    if entry.key and entry.mods then
+      local ek = normalize_key(entry.key)
+      local elist = {}
+      for m in entry.mods:gmatch("[^|]+") do table.insert(elist, m:upper()) end
+      if ek == target_key and normalize_mods(elist) == target_mods then
+        return entry.action
+      end
+    end
+  end
+  return nil
+end
+
 local function show_help(window, pane)
   local choices = {}
   for _, s in ipairs(shortcuts) do
@@ -66,12 +111,16 @@ local function show_help(window, pane)
 
   window:perform_action(
     wezterm.action.InputSelector({
-      title = "  Keyboard Shortcuts",
+      title = "  Keyboard Shortcuts  (Enter: execute  ·  Esc: cancel)",
       choices = choices,
       fuzzy = true,
       fuzzy_description = "Type to search shortcuts:",
-      action = wezterm.action_callback(function(_, _, _, _)
-        -- No-op: just a reference, selecting does nothing
+      action = wezterm.action_callback(function(inner_window, inner_pane, id, _)
+        if not id then return end
+        local action = find_action(id)
+        if action then
+          inner_window:perform_action(action, inner_pane)
+        end
       end),
     }),
     pane
@@ -79,6 +128,7 @@ local function show_help(window, pane)
 end
 
 function M.apply_to_config(config)
+  stored_config = config
   config.keys = config.keys or {}
 
   -- CMD+SHIFT+/ (CMD+?) → show shortcut help
