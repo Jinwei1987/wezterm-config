@@ -1,0 +1,12 @@
+-- Copy this file to settings.lua and fill in your secrets / local commands.
+-- settings.lua is gitignored and will not be committed.
+
+return {
+  -- anthropic = "sk-ant-...",
+  -- openai = "sk-...",
+
+  -- Shell command that prints an OTP code to stdout.
+  -- Bound to CMD+SHIFT+J — the code is typed into the active pane.
+  -- If unset, CMD+SHIFT+J shows a toast instead of running anything.
+  -- otp_command = "/absolute/path/to/otp-cmd <args>",
+}

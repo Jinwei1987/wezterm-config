@@ -1,0 +1,46 @@
+-- ==========================================================================
+--  snippets.lua — Command snippet definitions
+--
+--  Add your frequently used commands here. Each snippet has:
+--    label    : short name shown in the picker
+--    command  : the shell command to paste (use \n for multi-line)
+--    desc     : (optional) one-line description
+--
+--  These are searched by label + desc in the fuzzy picker.
+-- ==========================================================================
+
+return {
+  -- ── Git ────────────────────────────────────────────────────────
+  { label = "git status",         command = "git status",                         desc = "Show working tree status" },
+  { label = "git log oneline",    command = "git log --oneline -20",              desc = "Last 20 commits, compact" },
+  { label = "git log graph",      command = "git log --oneline --graph --all -20", desc = "Visual branch graph" },
+  { label = "git diff staged",    command = "git diff --cached",                  desc = "Show staged changes" },
+  { label = "git stash",          command = "git stash push -m ''",               desc = "Stash with message" },
+  { label = "git stash pop",      command = "git stash pop",                      desc = "Pop latest stash" },
+  { label = "git branch cleanup", command = "git branch --merged | grep -v '\\*\\|main\\|master' | xargs -n1 git branch -d", desc = "Delete merged branches" },
+  { label = "git undo commit",    command = "git reset --soft HEAD~1",            desc = "Undo last commit, keep changes" },
+
+  -- ── Docker ─────────────────────────────────────────────────────
+  { label = "docker ps",          command = "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'", desc = "Running containers" },
+  { label = "docker logs",        command = "docker logs -f --tail 100 ",         desc = "Follow container logs" },
+  { label = "docker prune",       command = "docker system prune -af",            desc = "Remove unused images/containers" },
+
+  -- ── System ─────────────────────────────────────────────────────
+  { label = "disk usage",         command = "du -sh * | sort -rh | head -20",     desc = "Top 20 largest items in cwd" },
+  { label = "port in use",        command = "lsof -i :",                          desc = "Check what's using a port" },
+  { label = "find large files",   command = "find . -type f -size +100M -exec ls -lh {} \\;", desc = "Files over 100MB" },
+  { label = "process search",     command = "ps aux | grep -i ",                  desc = "Search running processes" },
+  { label = "watch command",      command = "watch -n 2 ",                        desc = "Repeat command every 2s" },
+
+  -- ── Network ────────────────────────────────────────────────────
+  { label = "my ip",              command = "curl -s ifconfig.me && echo",        desc = "Public IP address" },
+  { label = "listen ports",       command = "netstat -tlnp 2>/dev/null || ss -tlnp", desc = "All listening ports" },
+
+  -- ── Kubernetes ─────────────────────────────────────────────────
+  { label = "k get pods",         command = "kubectl get pods",                   desc = "List pods" },
+  { label = "k get all",          command = "kubectl get all",                    desc = "All resources in namespace" },
+  { label = "k logs",             command = "kubectl logs -f --tail=100 ",        desc = "Follow pod logs" },
+
+  -- ── Add your own below ─────────────────────────────────────────
+
+}
