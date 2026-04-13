@@ -23,6 +23,11 @@ if not help_ok then
   wezterm.log_error("Failed to load help.lua: " .. tostring(help))
   help = nil
 end
+local snip_ok, snippets_mod = pcall(require, "snippets")
+if not snip_ok then
+  wezterm.log_error("Failed to load snippets.lua: " .. tostring(snippets_mod))
+  snippets_mod = nil
+end
 local settings_ok, settings = pcall(require, "settings")
 if not settings_ok then settings = {} end
 
@@ -531,9 +536,14 @@ end)
 -- ==========================================================================
 
 -- ==========================================================================
---  AI Features (CMD+SHIFT+A / CMD+SHIFT+X / CMD+SHIFT+G)
+--  Module bindings
+--    ai.lua        — CMD+SHIFT+{I,X,G,N}  AI features
+--    snippets.lua  — CMD+SHIFT+{S,Z}      Snippet picker + manager
+--    hosts.lua     — CMD+SHIFT+H          SSH/SFTP host launcher
+--    help.lua      — CMD+SHIFT+M          Shortcut cheat sheet
 -- ==========================================================================
 if ai then ai.apply_to_config(config) end
+if snippets_mod then snippets_mod.apply_to_config(config) end
 if hosts then hosts.apply_to_config(config) end
 if help then help.apply_to_config(config) end
 

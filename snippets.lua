@@ -1,46 +1,281 @@
 -- ==========================================================================
---  snippets.lua — Command snippet definitions
+--  snippets.lua — Snippet picker + add/delete manager
 --
---  Add your frequently used commands here. Each snippet has:
---    label    : short name shown in the picker
---    command  : the shell command to paste (use \n for multi-line)
---    desc     : (optional) one-line description
+--  Features:
+--    CMD+SHIFT+S → Snippet launcher (fuzzy-pick saved commands)
+--    CMD+SHIFT+Z → Manage user snippets (add / delete)
 --
---  These are searched by label + desc in the fuzzy picker.
+--  Sources:
+--    settings.snippets                     (from ~/.config/wezterm/settings.lua — curated defaults)
+--    ~/.config/wezterm/user_snippets.lua   (not in repo — dynamic adds via CMD+SHIFT+Z)
+--
+--  Usage: require("snippets").apply_to_config(config)
 -- ==========================================================================
 
-return {
-  -- ── Git ────────────────────────────────────────────────────────
-  { label = "git status",         command = "git status",                         desc = "Show working tree status" },
-  { label = "git log oneline",    command = "git log --oneline -20",              desc = "Last 20 commits, compact" },
-  { label = "git log graph",      command = "git log --oneline --graph --all -20", desc = "Visual branch graph" },
-  { label = "git diff staged",    command = "git diff --cached",                  desc = "Show staged changes" },
-  { label = "git stash",          command = "git stash push -m ''",               desc = "Stash with message" },
-  { label = "git stash pop",      command = "git stash pop",                      desc = "Pop latest stash" },
-  { label = "git branch cleanup", command = "git branch --merged | grep -v '\\*\\|main\\|master' | xargs -n1 git branch -d", desc = "Delete merged branches" },
-  { label = "git undo commit",    command = "git reset --soft HEAD~1",            desc = "Undo last commit, keep changes" },
+local wezterm = require("wezterm")
+local M = {}
 
-  -- ── Docker ─────────────────────────────────────────────────────
-  { label = "docker ps",          command = "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'", desc = "Running containers" },
-  { label = "docker logs",        command = "docker logs -f --tail 100 ",         desc = "Follow container logs" },
-  { label = "docker prune",       command = "docker system prune -af",            desc = "Remove unused images/containers" },
+-- ── Local helpers ────────────────────────────────────────────────────────
 
-  -- ── System ─────────────────────────────────────────────────────
-  { label = "disk usage",         command = "du -sh * | sort -rh | head -20",     desc = "Top 20 largest items in cwd" },
-  { label = "port in use",        command = "lsof -i :",                          desc = "Check what's using a port" },
-  { label = "find large files",   command = "find . -type f -size +100M -exec ls -lh {} \\;", desc = "Files over 100MB" },
-  { label = "process search",     command = "ps aux | grep -i ",                  desc = "Search running processes" },
-  { label = "watch command",      command = "watch -n 2 ",                        desc = "Repeat command every 2s" },
+local function write_tmp(text)
+  local tmp = os.tmpname()
+  local f = io.open(tmp, "w")
+  if f then
+    f:write(text)
+    f:close()
+  end
+  return tmp
+end
 
-  -- ── Network ────────────────────────────────────────────────────
-  { label = "my ip",              command = "curl -s ifconfig.me && echo",        desc = "Public IP address" },
-  { label = "listen ports",       command = "netstat -tlnp 2>/dev/null || ss -tlnp", desc = "All listening ports" },
+local function show_result(window, title, text)
+  local content = "━━━ " .. title .. " ━━━\n\n" .. text .. "\n\n━━━ Press q to close ━━━\n"
+  local tmp = write_tmp(content)
+  window:perform_action(
+    wezterm.action.SpawnCommandInNewTab({
+      args = { "/bin/zsh", "-c", string.format("less -R '%s'; rm -f '%s'", tmp, tmp) },
+    }),
+    window:active_pane()
+  )
+end
 
-  -- ── Kubernetes ─────────────────────────────────────────────────
-  { label = "k get pods",         command = "kubectl get pods",                   desc = "List pods" },
-  { label = "k get all",          command = "kubectl get all",                    desc = "All resources in namespace" },
-  { label = "k logs",             command = "kubectl logs -f --tail=100 ",        desc = "Follow pod logs" },
+-- ── User snippets file ──────────────────────────────────────────────────
 
-  -- ── Add your own below ─────────────────────────────────────────
+-- User snippets live outside the repo so adds via CMD+SHIFT+Z don't
+-- require editing checked-in files. Path: ~/.config/wezterm/user_snippets.lua
+local function user_snippets_path()
+  return (os.getenv("HOME") or "") .. "/.config/wezterm/user_snippets.lua"
+end
 
-}
+-- Load user snippets, bypassing Lua's require cache so newly-added entries
+-- appear immediately without a config reload.
+local function load_user_snippets()
+  package.loaded["user_snippets"] = nil
+  local ok, list = pcall(require, "user_snippets")
+  if ok and type(list) == "table" then return list end
+  return {}
+end
+
+-- Merge curated snippets (settings.snippets) with user_snippets.lua (user entries last)
+local function load_all_snippets()
+  local out = {}
+  package.loaded["settings"] = nil
+  local ok, s = pcall(require, "settings")
+  if ok and type(s) == "table" and type(s.snippets) == "table" then
+    for _, snip in ipairs(s.snippets) do table.insert(out, snip) end
+  end
+  for _, snip in ipairs(load_user_snippets()) do table.insert(out, snip) end
+  return out
+end
+
+-- Serialize user snippets back to disk. Uses %q so quotes/newlines/backslashes
+-- in label/command/desc are escaped into valid Lua source.
+local function write_user_snippets(list)
+  local path = user_snippets_path()
+  local f = io.open(path, "w")
+  if not f then return false, "could not open " .. path .. " for writing" end
+  f:write("-- Auto-generated by CMD+SHIFT+Z (add snippet). Safe to edit by hand.\n")
+  f:write("return {\n")
+  for _, s in ipairs(list) do
+    f:write(string.format("  { label = %q, command = %q, desc = %q },\n",
+      s.label or "", s.command or "", s.desc or ""))
+  end
+  f:write("}\n")
+  f:close()
+  return true
+end
+
+-- ── Launcher (CMD+SHIFT+S) ──────────────────────────────────────────────
+
+local function snippet_launcher(window, pane)
+  local snippets = load_all_snippets()
+  if #snippets == 0 then
+    show_result(window, "Snippets",
+      "No snippets found.\n\nAdd one with CMD+SHIFT+Z, or define a `snippets` table\nin ~/.config/wezterm/settings.lua")
+    return
+  end
+
+  local choices = {}
+  for _, s in ipairs(snippets) do
+    table.insert(choices, {
+      id = s.command,
+      label = s.label .. (s.desc and #s.desc > 0 and ("  —  " .. s.desc) or ""),
+    })
+  end
+
+  window:perform_action(
+    wezterm.action.InputSelector({
+      title = "  Snippet Launcher — select a command",
+      choices = choices,
+      fuzzy = true,
+      fuzzy_description = "Type to search snippets:",
+      action = wezterm.action_callback(function(_, inner_pane, id, _)
+        if id then
+          -- Paste the command but don't execute (user presses Enter)
+          inner_pane:send_text(id)
+        end
+      end),
+    }),
+    pane
+  )
+end
+
+-- ── Manage: Add / Delete (CMD+SHIFT+Z) ──────────────────────────────────
+
+local function add_snippet(window, pane)
+  window:perform_action(
+    wezterm.action.PromptInputLine({
+      description = wezterm.format({
+        { Attribute = { Intensity = "Bold" } },
+        { Foreground = { Color = "#a6e3a1" } },
+        { Text = "  Add Snippet — label:" },
+      }),
+      action = wezterm.action_callback(function(w1, p1, label)
+        if not label or #label == 0 then return end
+        w1:perform_action(
+          wezterm.action.PromptInputLine({
+            description = wezterm.format({
+              { Attribute = { Intensity = "Bold" } },
+              { Foreground = { Color = "#a6e3a1" } },
+              { Text = "  Add Snippet — command:" },
+            }),
+            action = wezterm.action_callback(function(w2, p2, command)
+              if not command or #command == 0 then return end
+              w2:perform_action(
+                wezterm.action.PromptInputLine({
+                  description = wezterm.format({
+                    { Attribute = { Intensity = "Bold" } },
+                    { Foreground = { Color = "#a6e3a1" } },
+                    { Text = "  Add Snippet — description (optional, Enter to skip):" },
+                  }),
+                  action = wezterm.action_callback(function(w3, _, desc)
+                    local list = load_user_snippets()
+                    table.insert(list, { label = label, command = command, desc = desc or "" })
+                    local ok, err = write_user_snippets(list)
+                    if ok then
+                      show_result(w3, "Snippet Added",
+                        "✓ Saved to " .. user_snippets_path() .. "\n\n"
+                          .. "label:   " .. label .. "\n"
+                          .. "command: " .. command .. "\n"
+                          .. (desc and #desc > 0 and ("desc:    " .. desc .. "\n") or "")
+                          .. "\nOpen with CMD+SHIFT+S.")
+                    else
+                      show_result(w3, "Snippet Error", "Failed to write file: " .. tostring(err))
+                    end
+                  end),
+                }),
+                p2
+              )
+            end),
+          }),
+          p1
+        )
+      end),
+    }),
+    pane
+  )
+end
+
+local function delete_snippet(window, pane)
+  local list = load_user_snippets()
+  if #list == 0 then
+    show_result(window, "Delete Snippet",
+      "No user snippets to delete.\n\nAdd one with CMD+SHIFT+Z → Add.")
+    return
+  end
+
+  local choices = {}
+  for i, s in ipairs(list) do
+    table.insert(choices, {
+      id = tostring(i),
+      label = s.label .. (s.desc and #s.desc > 0 and ("  —  " .. s.desc) or "")
+        .. "    [" .. s.command .. "]",
+    })
+  end
+
+  window:perform_action(
+    wezterm.action.InputSelector({
+      title = "  Delete Snippet — pick one to remove",
+      choices = choices,
+      fuzzy = true,
+      fuzzy_description = "Type to filter:",
+      action = wezterm.action_callback(function(inner_window, _, id, _)
+        if not id then return end
+        local idx = tonumber(id)
+        if not idx or not list[idx] then return end
+        local removed = list[idx]
+        table.remove(list, idx)
+        local ok, err = write_user_snippets(list)
+        if ok then
+          show_result(inner_window, "Snippet Deleted",
+            "✗ Removed: " .. removed.label .. "\n  command: " .. removed.command
+              .. "\n\n" .. tostring(#list) .. " user snippet(s) remain.")
+        else
+          show_result(inner_window, "Snippet Error", "Failed to write file: " .. tostring(err))
+        end
+      end),
+    }),
+    pane
+  )
+end
+
+local function manage_user_snippets(window, pane)
+  local user_count = #load_user_snippets()
+  local choices = {
+    { id = "add", label = "➕  Add new snippet" },
+  }
+  if user_count > 0 then
+    table.insert(choices, {
+      id = "delete",
+      label = string.format("➖  Delete existing snippet  (%d user snippet%s)",
+        user_count, user_count == 1 and "" or "s"),
+    })
+  end
+
+  window:perform_action(
+    wezterm.action.InputSelector({
+      title = "  User Snippets — pick an action",
+      choices = choices,
+      fuzzy = false,
+      action = wezterm.action_callback(function(inner_window, inner_pane, id, _)
+        if id == "add" then
+          add_snippet(inner_window, inner_pane)
+        elseif id == "delete" then
+          delete_snippet(inner_window, inner_pane)
+        end
+      end),
+    }),
+    pane
+  )
+end
+
+-- ── Apply to Config ─────────────────────────────────────────────────────
+
+function M.apply_to_config(config)
+  config.keys = config.keys or {}
+
+  -- CMD+SHIFT+S → Snippet Launcher (fuzzy search saved commands)
+  table.insert(config.keys, {
+    key = "s",
+    mods = "CMD|SHIFT",
+    action = wezterm.action_callback(function(window, pane)
+      local ok, err = pcall(snippet_launcher, window, pane)
+      if not ok then
+        wezterm.log_error("Snippet launcher error: " .. tostring(err))
+      end
+    end),
+  })
+
+  -- CMD+SHIFT+Z → Manage user snippets (add / delete)
+  table.insert(config.keys, {
+    key = "z",
+    mods = "CMD|SHIFT",
+    action = wezterm.action_callback(function(window, pane)
+      local ok, err = pcall(manage_user_snippets, window, pane)
+      if not ok then
+        wezterm.log_error("Manage snippets error: " .. tostring(err))
+      end
+    end),
+  })
+end
+
+return M

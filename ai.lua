@@ -5,6 +5,7 @@
 --    1. AI Command Suggest  (CMD+SHIFT+I) — get suggested fix from output
 --    2. AI Explain Output   (CMD+SHIFT+X) — explain errors/logs
 --    3. AI Git Commit Msg   (CMD+SHIFT+G) — generate commit message
+--    4. AI Command Bar      (CMD+SHIFT+N) — natural language → shell command
 --
 --  Setup:
 --    Add one or both API keys to ~/.config/wezterm/settings.lua:
@@ -345,42 +346,6 @@ local function ai_command_bar(window, pane)
   )
 end
 
--- ── Feature 5: Snippet Launcher (fuzzy-pick saved commands) ──────────────
-
-local function snippet_launcher(window, pane)
-  -- Load snippets
-  local snippets_ok, snippets = pcall(require, "snippets")
-  if not snippets_ok or not snippets then
-    show_result(window, "Snippets", "Could not load snippets.lua\nCreate it at ~/.config/wezterm/snippets.lua")
-    return
-  end
-
-  -- Build choices for InputSelector
-  local choices = {}
-  for _, s in ipairs(snippets) do
-    table.insert(choices, {
-      id = s.command,
-      label = s.label .. (s.desc and ("  —  " .. s.desc) or ""),
-    })
-  end
-
-  window:perform_action(
-    wezterm.action.InputSelector({
-      title = "  Snippet Launcher — select a command",
-      choices = choices,
-      fuzzy = true,
-      fuzzy_description = "Type to search snippets:",
-      action = wezterm.action_callback(function(_, inner_pane, id, label)
-        if id then
-          -- Paste the command but don't execute (user presses Enter)
-          inner_pane:send_text(id)
-        end
-      end),
-    }),
-    pane
-  )
-end
-
 -- ── Apply to Config ──────────────────────────────────────────────────────
 
 function M.apply_to_config(config)
@@ -433,19 +398,6 @@ function M.apply_to_config(config)
       end
     end),
   })
-
-  -- CMD+SHIFT+S → Snippet Launcher (fuzzy search saved commands)
-  table.insert(config.keys, {
-    key = "s",
-    mods = "CMD|SHIFT",
-    action = wezterm.action_callback(function(window, pane)
-      local ok, err = pcall(snippet_launcher, window, pane)
-      if not ok then
-        wezterm.log_error("Snippet launcher error: " .. tostring(err))
-      end
-    end),
-  })
-
 end
 
 return M

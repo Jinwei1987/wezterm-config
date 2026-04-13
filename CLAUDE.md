@@ -5,13 +5,16 @@ Modular WezTerm (Lua) configuration for macOS. All files live here and are symli
 ## Architecture
 
 ```
-wezterm.lua        Main config — appearance, keybindings, SSH tab title resolution
-├── state.lua      Shared state (pane_id → connection tracking for tab titles)
-├── ai.lua         AI features (Claude/OpenAI) — command suggest, explain, commit msg
-│   ├── settings.lua   API keys + local commands (NOT in repo, stays in ~/.config/wezterm/)
-│   └── snippets.lua  Command snippet definitions for fuzzy launcher
-├── hosts.lua      SSH/SFTP host launcher — parses ~/.ssh/config
-└── help.lua       Searchable shortcut cheat sheet (hardcoded list — keep in sync!)
+wezterm.lua       Main config — appearance, keybindings, SSH tab title resolution
+├── state.lua     Shared state (pane_id → connection tracking for tab titles)
+├── ai.lua        AI features (Claude/OpenAI) — command suggest, explain, commit msg, command bar
+├── snippets.lua  Snippet picker + add/delete manager
+│   ├── settings.snippets    Curated snippets (field in settings.lua, seeded from settings.lua.example)
+│   └── user_snippets.lua    Dynamic snippets (NOT in repo, written by CMD+SHIFT+Z)
+├── hosts.lua     SSH/SFTP host launcher — parses ~/.ssh/config
+└── help.lua      Searchable shortcut cheat sheet (hardcoded list — keep in sync!)
+
+settings.lua      API keys, otp_command, curated snippets (NOT in repo, stays in ~/.config/wezterm/)
 ```
 
 ## Key Design Decisions
@@ -28,7 +31,7 @@ wezterm.lua        Main config — appearance, keybindings, SSH tab title resolu
 - **SSH hostname resolution.** `wezterm.lua` parses `~/.ssh/config` at load time into `ssh_lookup` table. Maps IPs, hostnames, User-field-embedded-IPs, and suffixes all back to Host aliases. Tab titles show the alias (e.g., `region-app-env-role-NN`) instead of raw IPs. The parser must exclude `HostName`/`HostKeyAlgorithms` lines — uses `not trimmed:match("^%s*[Hh]ost[A-Za-z]")`.
 - **Complex SSH User fields.** Some entries have `User user@jumphost@10.0.0.1` (jump host embedded in User). The parser extracts every IP and every `@suffix` from the User field and maps each to the Host alias.
 - **Tab title tracking.** `state.pane_connections` maps `pane_id → {proto, host}`. Set by `hosts.lua` when launching, also set by `wezterm.lua`'s `format-tab-title` event when it detects SSH/SFTP by process name or pane title. Once resolved, the mapping is cached.
-- **API keys + local commands via `settings.lua`.** WezTerm's Lua does NOT inherit shell env vars (`os.getenv` fails for vars in `.zshrc`). Secrets and machine-specific commands are loaded from `~/.config/wezterm/settings.lua` which returns `{ openai = "sk-...", anthropic = "sk-ant-...", otp_command = "/abs/path/to/otp-cmd <args>" }`. `wezterm.lua` loads it via `pcall(require, "settings")` and the CMD+SHIFT+J handler toasts a warning when `otp_command` is missing instead of silently failing.
+- **`settings.lua` is the single user-local config file.** It holds API keys, `otp_command`, and the curated `snippets` table — WezTerm's Lua does NOT inherit shell env vars (`os.getenv` fails for vars in `.zshrc`), so everything user-specific lives in `~/.config/wezterm/settings.lua`. Shape: `{ openai = "sk-...", anthropic = "sk-ant-...", otp_command = "/abs/path/to/cmd", snippets = { { label, command, desc }, ... } }`. `wezterm.lua` / `ai.lua` / `snippets.lua` all load it via `pcall(require, "settings")`. The CMD+SHIFT+J handler opens an instruction tab when `otp_command` is missing; the snippet launcher falls back to an empty list + hint when `settings.snippets` is unset.
 - **Shell commands use `io.popen`.** `wezterm.run_child_process` had issues finding binaries outside WezTerm's PATH. All shell calls (OTP, AI curl, git diff) use `io.popen` with absolute paths where needed.
 - **AI calls via curl temp file.** JSON payloads are written to a temp file and sent with `curl -d @file` to avoid shell escaping issues.
 - **Long tab names trimmed from front**, not end: `region-app-env-role-NN` → `...app-env-role-NN`.
@@ -59,7 +62,8 @@ wezterm.lua        Main config — appearance, keybindings, SSH tab title resolu
 | `CMD+SHIFT+X` | AI explain output | ai.lua |
 | `CMD+SHIFT+G` | AI git commit message | ai.lua |
 | `CMD+SHIFT+N` | AI command bar | ai.lua |
-| `CMD+SHIFT+S` | Snippet launcher | ai.lua |
+| `CMD+SHIFT+S` | Snippet launcher | snippets.lua |
+| `CMD+SHIFT+Z` | Manage user snippets — add / delete (writes `user_snippets.lua`) | snippets.lua |
 | `CMD+SHIFT+H` | Host launcher (SSH/SFTP → tab or split) | hosts.lua |
 | `CMD+SHIFT+M` | Shortcut help | help.lua |
 
@@ -73,6 +77,7 @@ wezterm.lua        Main config — appearance, keybindings, SSH tab title resolu
 - **WezTerm Lua `pane:split()`** is the correct API for splitting panes programmatically. `wezterm.action.SplitPane` with `command = SpawnCommand(...)` does NOT work from inside `action_callback`.
 - **`window:get_selection_text_for_pane(pane)`** — NOT `pane:get_selection_text_for_pane()`. The window object owns the selection API.
 - **OTP command lives in `settings.lua`** as `otp_command` (absolute path required — WezTerm Lua has no shell PATH). If unset, CMD+SHIFT+J shows a toast rather than running anything.
+- **Snippets live in their own module.** `snippets.lua` owns both the picker (CMD+SHIFT+S) and the add/delete manager (CMD+SHIFT+Z) — not `ai.lua`. Curated defaults come from `settings.snippets` (inside `~/.config/wezterm/settings.lua`, seeded from `settings.lua.example`). Dynamic adds go to a separate `~/.config/wezterm/user_snippets.lua` so we never rewrite the user's secrets file. `load_all_snippets()` merges both sources, clearing `package.loaded["settings"]` and `package.loaded["user_snippets"]` before each require so edits appear without a config reload. The "Delete existing" option is hidden from the menu when `user_snippets.lua` is empty.
 
 ## Adding a New Keybinding
 
