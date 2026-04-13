@@ -77,6 +77,12 @@ local function pick_provider()
   return nil
 end
 
+local function current_model_label()
+  local p = pick_provider()
+  if not p then return "no api key" end
+  return M.models[p] or p
+end
+
 local NO_KEY_MSG = [[No API key found!
 
 Add your key to ~/.config/wezterm/settings.lua:
@@ -159,7 +165,17 @@ local function call_ai(system_prompt, user_message)
   end
 
   if text then
-    return text:gsub('\\"', '"'):gsub("\\n", "\n"):gsub("\\t", "\t"), nil
+    -- JSON string unescape. Hide escaped backslashes first so later passes
+    -- don't misinterpret the trailing char (e.g. `\\n` = literal backslash-n,
+    -- not a newline). NUL byte is a safe placeholder — never appears in API text.
+    text = text
+      :gsub("\\\\", "\0")
+      :gsub('\\"', '"')
+      :gsub("\\n", "\n")
+      :gsub("\\r", "\r")
+      :gsub("\\t", "\t")
+      :gsub("\0", "\\")
+    return text, nil
   end
 
   -- Check for error message in response
@@ -196,14 +212,15 @@ end
 -- ── Feature 1: AI Command Suggest ────────────────────────────────────────
 
 local function ai_command_suggest(window, pane)
+  local model_label = current_model_label()
   local context = get_selection(window, pane)
   if not context then
-    show_result(window, "AI Command Suggest",
+    show_result(window, "AI Command Suggest [" .. model_label .. "]",
       "No text selected.\n\nHow to use:\n  1. Select some terminal output (click+drag or enter Copy Mode)\n  2. Press CMD+SHIFT+I")
     return
   end
 
-  show_result(window, "AI Command Suggest", "Thinking... (this tab will update)")
+  show_result(window, "AI Command Suggest [" .. model_label .. "]", "Thinking... (this tab will update)")
 
   local response, err = call_ai(
     "You are a terminal command expert. The user shows terminal output (possibly errors). "
@@ -213,21 +230,24 @@ local function ai_command_suggest(window, pane)
   )
 
   if err then
-    show_result(window, "AI Error", err)
+    show_result(window, "AI Error [" .. model_label .. "]", err)
   else
-    show_result(window, "AI Suggested Commands", response)
+    show_result(window, "AI Suggested Commands [" .. model_label .. "]", response)
   end
 end
 
 -- ── Feature 2: AI Explain Output ─────────────────────────────────────────
 
 local function ai_explain_output(window, pane)
+  local model_label = current_model_label()
   local context = get_selection(window, pane)
   if not context then
-    show_result(window, "AI Explain",
+    show_result(window, "AI Explain [" .. model_label .. "]",
       "No text selected.\n\nHow to use:\n  1. Select some terminal output (click+drag or enter Copy Mode)\n  2. Press CMD+SHIFT+X")
     return
   end
+
+  show_result(window, "AI Explain [" .. model_label .. "]", "Thinking... (this tab will update)")
 
   local response, err = call_ai(
     "You are a helpful terminal assistant. Explain the following terminal output in plain English. "
@@ -237,15 +257,16 @@ local function ai_explain_output(window, pane)
   )
 
   if err then
-    show_result(window, "AI Error", err)
+    show_result(window, "AI Error [" .. model_label .. "]", err)
   else
-    show_result(window, "AI Explanation", response)
+    show_result(window, "AI Explanation [" .. model_label .. "]", response)
   end
 end
 
 -- ── Feature 3: AI Git Commit Message ─────────────────────────────────────
 
 local function ai_git_commit(window, pane)
+  local model_label = current_model_label()
   -- Try to get cwd from the pane
   local cwd = "."
   local pane_cwd = pane:get_current_working_dir()
@@ -273,7 +294,7 @@ local function ai_git_commit(window, pane)
   end
 
   if #diff:gsub("%s+", "") == 0 then
-    show_result(window, "AI Git Commit", "No git changes found (staged or unstaged).")
+    show_result(window, "AI Git Commit [" .. model_label .. "]", "No git changes found (staged or unstaged).")
     return
   end
 
@@ -290,7 +311,7 @@ local function ai_git_commit(window, pane)
   )
 
   if err then
-    show_result(window, "AI Error", err)
+    show_result(window, "AI Error [" .. model_label .. "]", err)
     return
   end
 
@@ -303,30 +324,47 @@ end
 
 -- ── Feature 4: AI Command Bar (natural language → shell command) ──────────
 
-local function ai_command_bar(window, pane)
-  -- Use WezTerm's built-in input prompt
+-- Multi-turn refinement: prompt → command → accept/refine/cancel.
+-- History accumulates so the AI can revise its previous command based on
+-- feedback instead of restarting from scratch each turn.
+local run_command_bar
+run_command_bar = function(window, pane, history)
+  local is_first = #history == 0
+  local model_label = current_model_label()
   window:perform_action(
     wezterm.action.PromptInputLine({
       description = wezterm.format({
         { Attribute = { Intensity = "Bold" } },
         { Foreground = { Color = "#f9e2af" } },
-        { Text = "  AI Command Bar — describe what you want to do:" },
+        { Text = is_first
+            and ("  AI Command Bar [" .. model_label .. "] — describe what you want to do:")
+            or ("  AI Command Bar [" .. model_label .. "] — refine (say how it should change):") },
       }),
       action = wezterm.action_callback(function(inner_window, inner_pane, line)
         if not line or #line == 0 then return end
 
-        -- Get OS info for context
+        table.insert(history, { role = "user", text = line })
+
         local os_info = ""
         local h = io.popen("uname -s 2>/dev/null")
         if h then os_info = h:read("*a"):gsub("%s+$", ""); h:close() end
 
+        local convo = ""
+        for _, turn in ipairs(history) do
+          if turn.role == "user" then
+            convo = convo .. "User: " .. turn.text .. "\n"
+          else
+            convo = convo .. "Previous command: " .. turn.command .. "\n"
+          end
+        end
+
         local response, err = call_ai(
-          "You are a shell command generator. The user describes what they want in plain English. "
-          .. "Generate the exact shell command(s) to accomplish it. "
-          .. "OS: " .. os_info .. ". Shell: zsh. "
-          .. "Reply ONLY with the command. No explanation, no markdown, no code fences. "
-          .. "If multiple commands are needed, join them with && on one line.",
-          line
+          "You are a shell command generator. OS: " .. os_info .. ". Shell: zsh. "
+          .. "The user describes what they want in plain English; they may refine across turns. "
+          .. "Reply ONLY with the command, no explanation, no markdown, no code fences. "
+          .. "If multiple commands are needed, join them with && on one line. "
+          .. "When refining, produce a NEW full command that incorporates the feedback.",
+          convo
         )
 
         if err then
@@ -334,16 +372,67 @@ local function ai_command_bar(window, pane)
           return
         end
 
-        if response then
-          -- Clean up: take only the first meaningful line
-          local cmd = response:gsub("^%s+", ""):gsub("%s+$", "")
-          -- Paste the command but don't execute (user presses Enter to confirm)
-          inner_pane:send_text(cmd)
+        local cmd = (response or ""):gsub("\r", "")
+        cmd = cmd:gsub("^%s+", ""):gsub("%s+$", "")
+        cmd = cmd:gsub("^```%w*\n?", ""):gsub("\n?```$", "")
+
+        -- Heredocs need real newlines to work — if the command contains one,
+        -- preserve the original structure and skip flattening. Pasting will
+        -- auto-execute on the closing delimiter; that's inherent to heredocs.
+        local has_heredoc = cmd:match("<<%-?%s*['\"]?[%w_]+") ~= nil
+        if not has_heredoc then
+          -- Collapse backslash line-continuations into a single physical line
+          -- (shell-equivalent), then join any remaining separate commands with &&
+          -- so `send_text` pastes one line instead of auto-executing per newline.
+          cmd = cmd:gsub("\\[ \t]*\n[ \t]*", " ")
+          cmd = cmd:gsub("[ \t]*\n+[ \t]*", " && ")
+          cmd = cmd:gsub("%s+", " ")
         end
+
+        if #cmd == 0 then
+          show_result(inner_window, "AI Error [" .. model_label .. "]", "Empty response from AI.")
+          return
+        end
+        table.insert(history, { role = "assistant", command = cmd })
+
+        -- InputSelector rows are single-line. For heredocs (multi-line cmd),
+        -- show the first line plus a hint in the label; the full cmd is what
+        -- actually gets pasted on accept.
+        local label_cmd
+        if has_heredoc then
+          local first_line = cmd:match("^([^\n]+)") or cmd
+          label_cmd = first_line .. "  …[heredoc — auto-runs on paste]"
+        else
+          label_cmd = cmd
+        end
+
+        inner_window:perform_action(
+          wezterm.action.InputSelector({
+            title = "  AI Command [" .. model_label .. "] — " .. label_cmd:sub(1, 80),
+            choices = {
+              { id = "accept", label = "✓  Accept and paste:  " .. label_cmd },
+              { id = "refine", label = "✎  Refine with another prompt" },
+              { id = "cancel", label = "✗  Cancel" },
+            },
+            fuzzy = false,
+            action = wezterm.action_callback(function(w2, p2, id, _)
+              if id == "accept" then
+                p2:send_text(cmd)
+              elseif id == "refine" then
+                run_command_bar(w2, p2, history)
+              end
+            end),
+          }),
+          inner_pane
+        )
       end),
     }),
     pane
   )
+end
+
+local function ai_command_bar(window, pane)
+  run_command_bar(window, pane, {})
 end
 
 -- ── Apply to Config ──────────────────────────────────────────────────────
