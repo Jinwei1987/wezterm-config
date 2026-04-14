@@ -7,7 +7,7 @@ Modular WezTerm (Lua) configuration for macOS. All files live here and are symli
 ```
 wezterm.lua       Main config — appearance, keybindings, SSH tab title resolution
 ├── state.lua     Shared state (pane_id → connection tracking for tab titles)
-├── ai.lua        AI features (Claude/OpenAI) — command suggest, explain, commit msg, command bar
+├── ai.lua        AI features (Claude/OpenAI) — command suggest, explain, commit msg, chat
 ├── snippets.lua  Snippet picker + add/delete manager
 │   ├── settings.snippets    Curated snippets (field in settings.lua, seeded from settings.lua.example)
 │   └── user_snippets.lua    Dynamic snippets (NOT in repo, written by CMD+SHIFT+Z)
@@ -61,7 +61,7 @@ settings.lua      API keys, otp_command, curated snippets (NOT in repo, stays in
 | `CMD+SHIFT+I` | AI suggest fix | ai.lua |
 | `CMD+SHIFT+X` | AI explain output | ai.lua |
 | `CMD+SHIFT+G` | AI git commit message | ai.lua |
-| `CMD+SHIFT+N` | AI command bar | ai.lua |
+| `CMD+SHIFT+N` | AI chat (multi-turn conversation) | ai.lua |
 | `CMD+SHIFT+S` | Snippet launcher | snippets.lua |
 | `CMD+SHIFT+Z` | Manage user snippets — add / delete (writes `user_snippets.lua`) | snippets.lua |
 | `CMD+SHIFT+H` | Host launcher (SSH/SFTP → tab or split) | hosts.lua |

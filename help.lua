@@ -43,7 +43,7 @@ local shortcuts = {
   { keys = "CMD+SHIFT+J",        desc = "Auto-fill OTP (runs settings.otp_command)" },
 
   -- AI
-  { keys = "CMD+SHIFT+N",        desc = "AI command bar (describe → command)" },
+  { keys = "CMD+SHIFT+N",        desc = "AI chat (multi-turn conversation)" },
   { keys = "CMD+SHIFT+I",        desc = "AI suggest fix (select output first)" },
   { keys = "CMD+SHIFT+X",        desc = "AI explain output (select output first)" },
   { keys = "CMD+SHIFT+G",        desc = "AI git commit message" },

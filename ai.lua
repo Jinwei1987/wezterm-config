@@ -5,7 +5,7 @@
 --    1. AI Command Suggest  (CMD+SHIFT+I) — get suggested fix from output
 --    2. AI Explain Output   (CMD+SHIFT+X) — explain errors/logs
 --    3. AI Git Commit Msg   (CMD+SHIFT+G) — generate commit message
---    4. AI Command Bar      (CMD+SHIFT+N) — natural language → shell command
+--    4. AI Chat             (CMD+SHIFT+N) — multi-turn AI conversation
 --
 --  Setup:
 --    Add one or both API keys to ~/.config/wezterm/settings.lua:
@@ -26,10 +26,35 @@ local M = {}
 
 M.default_provider = "claude"
 
+-- Supported models per provider. First entry is the default when no explicit
+-- selection has been made. Edit freely — these are just labels sent in the
+-- API `model` field. Use `\model` inside AI Chat (CMD+SHIFT+N) to switch.
 M.models = {
-  claude = "claude-sonnet-4-20250514",
-  gpt = "gpt-4o",
+  claude = {
+    "claude-sonnet-4-5",
+    "claude-opus-4-5",
+    "claude-haiku-4-5",
+    "claude-sonnet-4-20250514",
+    "claude-3-5-sonnet-20241022",
+  },
+  gpt = {
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "o1",
+    "o1-mini",
+  },
 }
+
+-- Runtime selection (nil = fall back to the first model of the first provider
+-- with a valid API key). Updated by `pick_model()`.
+local active_provider = nil
+local active_model = nil
+
+-- Lazy-fetched live model list per provider. Populated on first `\model`
+-- invocation, reused for the session. `\model` picker offers a refresh option.
+-- Empty/missing entries fall back to the hardcoded `M.models[provider]`.
+local fetched_models = {}
 
 -- ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -77,10 +102,81 @@ local function pick_provider()
   return nil
 end
 
-local function current_model_label()
+-- Fetch the live model list from the provider's /v1/models endpoint.
+-- Returns a list of model id strings on success, or nil on any failure.
+local function fetch_models(provider)
+  local key = get_api_key(provider)
+  if not key then return nil end
+
+  local url, headers
+  if provider == "claude" then
+    url = "https://api.anthropic.com/v1/models"
+    headers = string.format(
+      "-H 'x-api-key: %s' -H 'anthropic-version: 2023-06-01'", key)
+  else
+    url = "https://api.openai.com/v1/models"
+    headers = string.format("-H 'Authorization: Bearer %s'", key)
+  end
+
+  local cmd = string.format("curl -s -m 10 '%s' %s 2>/dev/null", url, headers)
+  local h = io.popen(cmd)
+  if not h then return nil end
+  local body = h:read("*a")
+  h:close()
+  if not body or #body == 0 then return nil end
+
+  local ids = {}
+  for id in body:gmatch('"id"%s*:%s*"([^"]+)"') do
+    table.insert(ids, id)
+  end
+  if #ids == 0 then return nil end
+
+  -- OpenAI's list contains embeddings, whisper, dall-e, fine-tunes, etc.
+  -- Keep only chat-capable families: gpt-* and o<digit>* (o1, o3, o4, …).
+  if provider == "gpt" then
+    local filtered = {}
+    for _, id in ipairs(ids) do
+      if id:match("^gpt%-") or id:match("^o%d") then
+        table.insert(filtered, id)
+      end
+    end
+    ids = filtered
+  end
+  if #ids == 0 then return nil end
+
+  -- Sort descending so newer-looking ids surface first.
+  table.sort(ids, function(a, b) return a > b end)
+  return ids
+end
+
+-- Return the list of model ids to offer for a provider. Prefers the live
+-- fetched cache; otherwise tries to fetch (and caches on success); otherwise
+-- falls back to the hardcoded list in `M.models`.
+local function get_models(provider)
+  if fetched_models[provider] then return fetched_models[provider] end
+  local ids = fetch_models(provider)
+  if ids and #ids > 0 then
+    fetched_models[provider] = ids
+    return ids
+  end
+  return M.models[provider] or {}
+end
+
+-- Returns (provider, model). Uses the runtime selection if set, otherwise
+-- the first model of the first provider with a valid key.
+local function get_active()
+  if active_provider and active_model then
+    return active_provider, active_model
+  end
   local p = pick_provider()
-  if not p then return "no api key" end
-  return M.models[p] or p
+  if not p then return nil, nil end
+  local list = M.models[p]
+  return p, (list and list[1]) or p
+end
+
+local function current_model_label()
+  local _, m = get_active()
+  return m or "no api key"
 end
 
 local NO_KEY_MSG = [[No API key found!
@@ -107,7 +203,7 @@ end
 
 -- Build the curl command, writing payload to a temp file to avoid shell escaping issues
 local function call_ai(system_prompt, user_message)
-  local provider = pick_provider()
+  local provider, model = get_active()
   if not provider then
     return nil, NO_KEY_MSG
   end
@@ -121,7 +217,7 @@ local function call_ai(system_prompt, user_message)
     -- Escape for JSON
     local sys = system_prompt:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
     local usr = user_message:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
-    payload = '{"model":"' .. M.models.claude .. '","max_tokens":1024,'
+    payload = '{"model":"' .. model .. '","max_tokens":1024,'
       .. '"system":"' .. sys .. '",'
       .. '"messages":[{"role":"user","content":"' .. usr .. '"}]}'
     headers = string.format(
@@ -132,7 +228,7 @@ local function call_ai(system_prompt, user_message)
     url = "https://api.openai.com/v1/chat/completions"
     local sys = system_prompt:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
     local usr = user_message:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
-    payload = '{"model":"' .. M.models.gpt .. '","max_tokens":1024,'
+    payload = '{"model":"' .. model .. '","max_tokens":1024,'
       .. '"messages":[{"role":"system","content":"' .. sys .. '"},'
       .. '{"role":"user","content":"' .. usr .. '"}]}'
     headers = string.format(
@@ -322,117 +418,183 @@ local function ai_git_commit(window, pane)
   end
 end
 
--- ── Feature 4: AI Command Bar (natural language → shell command) ──────────
+-- ── Model picker (shared) ─────────────────────────────────────────────────
 
--- Multi-turn refinement: prompt → command → accept/refine/cancel.
--- History accumulates so the AI can revise its previous command based on
--- feedback instead of restarting from scratch each turn.
-local run_command_bar
-run_command_bar = function(window, pane, history)
-  local is_first = #history == 0
-  local model_label = current_model_label()
+-- Open an InputSelector listing every supported model across providers.
+-- Model lists are fetched live from each provider's /v1/models endpoint on
+-- first use and cached for the session; providers without a key fall back
+-- to the hardcoded list. Selecting "Refresh" clears the cache and re-fetches.
+local pick_model
+pick_model = function(window, pane, on_done)
+  local choices = {
+    { id = "__refresh__", label = "↻  Refresh model list from API" },
+  }
+  for _, provider in ipairs({ "claude", "gpt" }) do
+    local has_key = get_api_key(provider) ~= nil
+    local list = get_models(provider)
+    local source = fetched_models[provider] and "live" or "fallback"
+    for _, model in ipairs(list) do
+      local marker = (provider == active_provider and model == active_model) and "● " or "  "
+      local suffix = has_key and ("   (" .. source .. ")") or "   (no api key)"
+      table.insert(choices, {
+        id = provider .. "|" .. model,
+        label = marker .. string.format("%-8s  %s%s", "[" .. provider .. "]", model, suffix),
+      })
+    end
+  end
+
   window:perform_action(
-    wezterm.action.PromptInputLine({
-      description = wezterm.format({
-        { Attribute = { Intensity = "Bold" } },
-        { Foreground = { Color = "#f9e2af" } },
-        { Text = is_first
-            and ("  AI Command Bar [" .. model_label .. "] — describe what you want to do:")
-            or ("  AI Command Bar [" .. model_label .. "] — refine (say how it should change):") },
-      }),
-      action = wezterm.action_callback(function(inner_window, inner_pane, line)
-        if not line or #line == 0 then return end
-
-        table.insert(history, { role = "user", text = line })
-
-        local os_info = ""
-        local h = io.popen("uname -s 2>/dev/null")
-        if h then os_info = h:read("*a"):gsub("%s+$", ""); h:close() end
-
-        local convo = ""
-        for _, turn in ipairs(history) do
-          if turn.role == "user" then
-            convo = convo .. "User: " .. turn.text .. "\n"
-          else
-            convo = convo .. "Previous command: " .. turn.command .. "\n"
+    wezterm.action.InputSelector({
+      title = "  Select AI model  (Enter: use  ·  Esc: cancel)",
+      choices = choices,
+      fuzzy = true,
+      fuzzy_description = "Type to filter models:",
+      action = wezterm.action_callback(function(w, p, id, _)
+        if id == "__refresh__" then
+          fetched_models = {}
+          pick_model(w, p, on_done)
+          return
+        end
+        if id then
+          local provider, model = id:match("^([^|]+)|(.+)$")
+          if provider and model then
+            active_provider = provider
+            active_model = model
           end
         end
-
-        local response, err = call_ai(
-          "You are a shell command generator. OS: " .. os_info .. ". Shell: zsh. "
-          .. "The user describes what they want in plain English; they may refine across turns. "
-          .. "Reply ONLY with the command, no explanation, no markdown, no code fences. "
-          .. "If multiple commands are needed, join them with && on one line. "
-          .. "When refining, produce a NEW full command that incorporates the feedback.",
-          convo
-        )
-
-        if err then
-          show_result(inner_window, "AI Error", err)
-          return
-        end
-
-        local cmd = (response or ""):gsub("\r", "")
-        cmd = cmd:gsub("^%s+", ""):gsub("%s+$", "")
-        cmd = cmd:gsub("^```%w*\n?", ""):gsub("\n?```$", "")
-
-        -- Heredocs need real newlines to work — if the command contains one,
-        -- preserve the original structure and skip flattening. Pasting will
-        -- auto-execute on the closing delimiter; that's inherent to heredocs.
-        local has_heredoc = cmd:match("<<%-?%s*['\"]?[%w_]+") ~= nil
-        if not has_heredoc then
-          -- Collapse backslash line-continuations into a single physical line
-          -- (shell-equivalent), then join any remaining separate commands with &&
-          -- so `send_text` pastes one line instead of auto-executing per newline.
-          cmd = cmd:gsub("\\[ \t]*\n[ \t]*", " ")
-          cmd = cmd:gsub("[ \t]*\n+[ \t]*", " && ")
-          cmd = cmd:gsub("%s+", " ")
-        end
-
-        if #cmd == 0 then
-          show_result(inner_window, "AI Error [" .. model_label .. "]", "Empty response from AI.")
-          return
-        end
-        table.insert(history, { role = "assistant", command = cmd })
-
-        -- InputSelector rows are single-line. For heredocs (multi-line cmd),
-        -- show the first line plus a hint in the label; the full cmd is what
-        -- actually gets pasted on accept.
-        local label_cmd
-        if has_heredoc then
-          local first_line = cmd:match("^([^\n]+)") or cmd
-          label_cmd = first_line .. "  …[heredoc — auto-runs on paste]"
-        else
-          label_cmd = cmd
-        end
-
-        inner_window:perform_action(
-          wezterm.action.InputSelector({
-            title = "  AI Command [" .. model_label .. "] — " .. label_cmd:sub(1, 80),
-            choices = {
-              { id = "accept", label = "✓  Accept and paste:  " .. label_cmd },
-              { id = "refine", label = "✎  Refine with another prompt" },
-              { id = "cancel", label = "✗  Cancel" },
-            },
-            fuzzy = false,
-            action = wezterm.action_callback(function(w2, p2, id, _)
-              if id == "accept" then
-                p2:send_text(cmd)
-              elseif id == "refine" then
-                run_command_bar(w2, p2, history)
-              end
-            end),
-          }),
-          inner_pane
-        )
+        if on_done then on_done(w, p) end
       end),
     }),
     pane
   )
 end
 
-local function ai_command_bar(window, pane)
-  run_command_bar(window, pane, {})
+-- ── Feature 4: AI Chat (multi-turn conversation) ─────────────────────────
+
+-- Persistent chat history. Module-level so the session survives closing and
+-- re-opening the prompt — user can pause, read the response, then reinvoke
+-- CMD+SHIFT+N and keep going with full context.
+local chat_history = {}
+
+-- Inline commands recognised instead of being sent as user messages
+local CHAT_HELP = [[Inline commands:
+  /new     Start a fresh chat (clears history)
+  /show    Open the full transcript in a new tab
+  /model   Switch AI model
+  /end     End and clear the session
+  /help    Show this help
+(Empty input or Esc pauses the session — reinvoke CMD+SHIFT+N to resume.)]]
+
+local function build_transcript(history)
+  if #history == 0 then return "(empty chat — type something to begin)" end
+  local parts = {}
+  for _, t in ipairs(history) do
+    table.insert(parts, (t.role == "user" and "── You ──" or "── AI ──"))
+    table.insert(parts, t.text)
+    table.insert(parts, "")
+  end
+  return table.concat(parts, "\n")
+end
+
+local function last_assistant(history)
+  for i = #history, 1, -1 do
+    if history[i].role == "assistant" then return history[i].text end
+  end
+  return nil
+end
+
+local function chat_description(history, model_label)
+  local parts = {
+    { Attribute = { Intensity = "Bold" } },
+    { Foreground = { Color = "#89b4fa" } },
+    { Text = "  AI Chat [" .. model_label .. "]" },
+  }
+  if #history > 0 then
+    local turns = 0
+    for _, t in ipairs(history) do if t.role == "user" then turns = turns + 1 end end
+    table.insert(parts, {
+      Text = string.format("  (%d turn%s)", turns, turns == 1 and "" or "s"),
+    })
+  end
+
+  local resp = last_assistant(history)
+  if resp then
+    table.insert(parts, { Attribute = { Intensity = "Normal" } })
+    table.insert(parts, { Foreground = { Color = "#cdd6f4" } })
+    -- Cap preview so description stays readable; \show has the full thing.
+    local preview = resp
+    if #preview > 1200 then preview = preview:sub(1, 1200) .. "\n… (truncated — use /show for full)" end
+    table.insert(parts, { Text = "\n\n" .. preview .. "\n" })
+  end
+
+  table.insert(parts, { Attribute = { Intensity = "Bold" } })
+  table.insert(parts, { Foreground = { Color = "#f9e2af" } })
+  table.insert(parts, { Text = "\n  You (/new /show /model /end /help  ·  Esc=pause):" })
+  return wezterm.format(parts)
+end
+
+local run_chat
+run_chat = function(window, pane)
+  local model_label = current_model_label()
+  window:perform_action(
+    wezterm.action.PromptInputLine({
+      description = chat_description(chat_history, model_label),
+      action = wezterm.action_callback(function(w, p, line)
+        if not line or #line == 0 then return end  -- pause (keep history)
+
+        -- Inline commands
+        if line == "/new" then
+          chat_history = {}
+          run_chat(w, p)
+          return
+        elseif line == "/end" then
+          chat_history = {}
+          return
+        elseif line == "/show" then
+          show_result(w, "AI Chat Transcript [" .. model_label .. "]",
+            build_transcript(chat_history))
+          return
+        elseif line == "/model" then
+          pick_model(w, p, function(w2, p2) run_chat(w2, p2) end)
+          return
+        elseif line == "/help" then
+          show_result(w, "AI Chat Help [" .. model_label .. "]", CHAT_HELP)
+          return
+        end
+
+        table.insert(chat_history, { role = "user", text = line })
+
+        local convo = ""
+        for _, turn in ipairs(chat_history) do
+          convo = convo .. (turn.role == "user" and "User: " or "Assistant: ")
+            .. turn.text .. "\n\n"
+        end
+
+        local response, err = call_ai(
+          "You are a helpful AI assistant conversing with the user in a terminal window. "
+          .. "Reply in plain text suitable for terminal display — no markdown fences, no HTML. "
+          .. "Use clear line breaks and keep responses focused. The conversation below is "
+          .. "the full history so far; respond to the latest user turn.",
+          convo
+        )
+
+        if err then
+          show_result(w, "AI Chat Error [" .. model_label .. "]", err)
+          return
+        end
+
+        local clean = (response or ""):gsub("\r", "")
+        clean = clean:gsub("^%s+", ""):gsub("%s+$", "")
+        table.insert(chat_history, { role = "assistant", text = clean })
+        run_chat(w, p)
+      end),
+    }),
+    pane
+  )
+end
+
+local function ai_chat(window, pane)
+  run_chat(window, pane)
 end
 
 -- ── Apply to Config ──────────────────────────────────────────────────────
@@ -481,9 +643,9 @@ function M.apply_to_config(config)
     key = "n",
     mods = "CMD|SHIFT",
     action = wezterm.action_callback(function(window, pane)
-      local ok, err = pcall(ai_command_bar, window, pane)
+      local ok, err = pcall(ai_chat, window, pane)
       if not ok then
-        wezterm.log_error("AI command bar error: " .. tostring(err))
+        wezterm.log_error("AI chat error: " .. tostring(err))
       end
     end),
   })
