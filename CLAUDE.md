@@ -7,7 +7,7 @@ Modular WezTerm (Lua) configuration for macOS. All files live here and are symli
 ```
 wezterm.lua       Main config — appearance, keybindings, SSH tab title resolution
 ├── state.lua     Shared state (pane_id → connection tracking for tab titles)
-├── ai.lua        AI features (Claude/OpenAI) — command suggest, explain, commit msg, chat
+├── ai.lua        AI features (Claude/OpenAI/Perplexity) — suggest, explain, commit msg, chat
 ├── snippets.lua  Snippet picker + add/delete manager
 │   ├── settings.snippets    Curated snippets (field in settings.lua, seeded from settings.lua.example)
 │   └── user_snippets.lua    Dynamic snippets (NOT in repo, written by CMD+SHIFT+Z)
@@ -31,9 +31,11 @@ settings.lua      API keys, otp_command, curated snippets (NOT in repo, stays in
 - **SSH hostname resolution.** `wezterm.lua` parses `~/.ssh/config` at load time into `ssh_lookup` table. Maps IPs, hostnames, User-field-embedded-IPs, and suffixes all back to Host aliases. Tab titles show the alias (e.g., `region-app-env-role-NN`) instead of raw IPs. The parser must exclude `HostName`/`HostKeyAlgorithms` lines — uses `not trimmed:match("^%s*[Hh]ost[A-Za-z]")`.
 - **Complex SSH User fields.** Some entries have `User user@jumphost@10.0.0.1` (jump host embedded in User). The parser extracts every IP and every `@suffix` from the User field and maps each to the Host alias.
 - **Tab title tracking.** `state.pane_connections` maps `pane_id → {proto, host}`. Set by `hosts.lua` when launching, also set by `wezterm.lua`'s `format-tab-title` event when it detects SSH/SFTP by process name or pane title. Once resolved, the mapping is cached.
-- **`settings.lua` is the single user-local config file.** It holds API keys, `otp_command`, and the curated `snippets` table — WezTerm's Lua does NOT inherit shell env vars (`os.getenv` fails for vars in `.zshrc`), so everything user-specific lives in `~/.config/wezterm/settings.lua`. Shape: `{ openai = "sk-...", anthropic = "sk-ant-...", otp_command = "/abs/path/to/cmd", snippets = { { label, command, desc }, ... } }`. `wezterm.lua` / `ai.lua` / `snippets.lua` all load it via `pcall(require, "settings")`. The CMD+SHIFT+J handler opens an instruction tab when `otp_command` is missing; the snippet launcher falls back to an empty list + hint when `settings.snippets` is unset.
+- **`settings.lua` is the single user-local config file.** It holds API keys, `otp_command`, and the curated `snippets` table — WezTerm's Lua does NOT inherit shell env vars (`os.getenv` fails for vars in `.zshrc`), so everything user-specific lives in `~/.config/wezterm/settings.lua`. Shape: `{ openai = "sk-...", anthropic = "sk-ant-...", perplexity = "pplx-...", otp_command = "/abs/path/to/cmd", snippets = { { label, command, desc }, ... } }`. `wezterm.lua` / `ai.lua` / `snippets.lua` all load it via `pcall(require, "settings")`. The CMD+SHIFT+J handler opens an instruction tab when `otp_command` is missing; the snippet launcher falls back to an empty list + hint when `settings.snippets` is unset.
 - **Shell commands use `io.popen`.** `wezterm.run_child_process` had issues finding binaries outside WezTerm's PATH. All shell calls (OTP, AI curl, git diff) use `io.popen` with absolute paths where needed.
-- **AI calls via curl temp file.** JSON payloads are written to a temp file and sent with `curl -d @file` to avoid shell escaping issues.
+- **AI calls via curl temp file.** JSON payloads are written to a temp file and sent with `curl -d @file` to avoid shell escaping issues. Responses are parsed by walking the JSON string manually (`extract_json_string` in `ai.lua`) — Lua's lazy `.-` pattern stops at the first `"` even when it's an escaped `\"`, which would silently truncate any reply containing a quote.
+- **AI providers + runtime model picker.** `ai.lua` supports Claude, OpenAI (GPT-5.x), and Perplexity. Active `(provider, model)` is runtime-selectable via `/model` inside CMD+SHIFT+N chat (also switches which model the one-shot features use). Model lists are lazy-fetched from each provider's `/v1/models` endpoint on first use and cached for the session; Perplexity has no public `/models` so it falls back to the hardcoded list. Without an explicit pick, `get_active()` returns the first provider in `M.providers` that has a key, and that provider's first model.
+- **AI Chat session state is module-level.** `chat_history` in `ai.lua` outlives a single prompt — Esc / empty input pauses the session; reinvoking CMD+SHIFT+N resumes with full context. Inline commands: `/new` clears, `/show` opens transcript, `/model` switches model, `/end` clears + exits, `/help` lists them.
 - **Long tab names trimmed from front**, not end: `region-app-env-role-NN` → `...app-env-role-NN`.
 
 ## Keybinding Map
@@ -78,6 +80,8 @@ settings.lua      API keys, otp_command, curated snippets (NOT in repo, stays in
 - **`window:get_selection_text_for_pane(pane)`** — NOT `pane:get_selection_text_for_pane()`. The window object owns the selection API.
 - **OTP command lives in `settings.lua`** as `otp_command` (absolute path required — WezTerm Lua has no shell PATH). If unset, CMD+SHIFT+J shows a toast rather than running anything.
 - **Snippets live in their own module.** `snippets.lua` owns both the picker (CMD+SHIFT+S) and the add/delete manager (CMD+SHIFT+Z) — not `ai.lua`. Curated defaults come from `settings.snippets` (inside `~/.config/wezterm/settings.lua`, seeded from `settings.lua.example`). Dynamic adds go to a separate `~/.config/wezterm/user_snippets.lua` so we never rewrite the user's secrets file. `load_all_snippets()` merges both sources, clearing `package.loaded["settings"]` and `package.loaded["user_snippets"]` before each require so edits appear without a config reload. The "Delete existing" option is hidden from the menu when `user_snippets.lua` is empty.
+- **GPT-5.x rejects `max_tokens`.** The OpenAI branch of `call_ai` must send `max_completion_tokens` instead. Claude and Perplexity still use `max_tokens` — don't collapse the three branches.
+- **`show_result` spawns a fresh tab every call.** It's synchronous `less` on a temp file, so you can't pre-spawn a "Thinking…" placeholder and then update it — the second call creates a sibling tab, leaving a stale one behind. Call `show_result` exactly once, after the API response is in hand.
 
 ## Adding a New Keybinding
 
