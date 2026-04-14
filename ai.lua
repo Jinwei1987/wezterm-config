@@ -1,5 +1,5 @@
 -- ==========================================================================
---  ai.lua — AI features for WezTerm (Claude + GPT support)
+--  ai.lua — AI features for WezTerm (Claude + GPT + Perplexity support)
 --
 --  Features:
 --    1. AI Command Suggest  (CMD+SHIFT+I) — get suggested fix from output
@@ -8,13 +8,15 @@
 --    4. AI Chat             (CMD+SHIFT+N) — multi-turn AI conversation
 --
 --  Setup:
---    Add one or both API keys to ~/.config/wezterm/settings.lua:
+--    Add one or more API keys to ~/.config/wezterm/settings.lua:
 --      return {
---        anthropic = "sk-ant-...",
---        openai    = "sk-...",
+--        anthropic  = "sk-ant-...",
+--        openai     = "sk-...",
+--        perplexity = "pplx-...",
 --      }
---    (Env vars ANTHROPIC_API_KEY / OPENAI_API_KEY are also honored as a fallback,
---    but WezTerm's Lua does NOT inherit shell rc exports, so settings.lua is preferred.)
+--    (Env vars ANTHROPIC_API_KEY / OPENAI_API_KEY / PERPLEXITY_API_KEY are also
+--    honored as a fallback, but WezTerm's Lua does NOT inherit shell rc exports,
+--    so settings.lua is preferred.)
 --
 --  Usage: require("ai").apply_to_config(config)
 -- ==========================================================================
@@ -26,9 +28,12 @@ local M = {}
 
 M.default_provider = "claude"
 
+-- Provider order — drives pick_provider() fallback and the /model picker layout.
+M.providers = { "claude", "gpt", "perplexity" }
+
 -- Supported models per provider. First entry is the default when no explicit
 -- selection has been made. Edit freely — these are just labels sent in the
--- API `model` field. Use `\model` inside AI Chat (CMD+SHIFT+N) to switch.
+-- API `model` field. Use `/model` inside AI Chat (CMD+SHIFT+N) to switch.
 M.models = {
   claude = {
     "claude-sonnet-4-5",
@@ -38,11 +43,15 @@ M.models = {
     "claude-3-5-sonnet-20241022",
   },
   gpt = {
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gpt-4-turbo",
-    "o1",
-    "o1-mini",
+    "gpt-5.3",
+    "gpt-5.4",
+  },
+  perplexity = {
+    "sonar",
+    "sonar-pro",
+    "sonar-reasoning",
+    "sonar-reasoning-pro",
+    "sonar-deep-research",
   },
 }
 
@@ -71,6 +80,7 @@ local function load_settings()
   if ok and type(file_settings) == "table" then
     _settings.anthropic = file_settings.anthropic
     _settings.openai = file_settings.openai
+    _settings.perplexity = file_settings.perplexity
   end
 
   -- 2. Try os.getenv as fallback
@@ -82,6 +92,10 @@ local function load_settings()
     local v = os.getenv("OPENAI_API_KEY")
     if v and #v > 0 then _settings.openai = v end
   end
+  if not _settings.perplexity then
+    local v = os.getenv("PERPLEXITY_API_KEY")
+    if v and #v > 0 then _settings.perplexity = v end
+  end
 end
 
 local function get_api_key(provider)
@@ -90,23 +104,27 @@ local function get_api_key(provider)
     return _settings.anthropic
   elseif provider == "gpt" then
     return _settings.openai
+  elseif provider == "perplexity" then
+    return _settings.perplexity
   end
   return nil
 end
 
 local function pick_provider()
-  local pref = M.default_provider
-  if get_api_key(pref) then return pref end
-  local other = pref == "claude" and "gpt" or "claude"
-  if get_api_key(other) then return other end
+  if get_api_key(M.default_provider) then return M.default_provider end
+  for _, p in ipairs(M.providers) do
+    if p ~= M.default_provider and get_api_key(p) then return p end
+  end
   return nil
 end
 
 -- Fetch the live model list from the provider's /v1/models endpoint.
 -- Returns a list of model id strings on success, or nil on any failure.
+-- Perplexity has no public /models endpoint — always use the hardcoded list.
 local function fetch_models(provider)
   local key = get_api_key(provider)
   if not key then return nil end
+  if provider == "perplexity" then return nil end
 
   local url, headers
   if provider == "claude" then
@@ -132,11 +150,11 @@ local function fetch_models(provider)
   if #ids == 0 then return nil end
 
   -- OpenAI's list contains embeddings, whisper, dall-e, fine-tunes, etc.
-  -- Keep only chat-capable families: gpt-* and o<digit>* (o1, o3, o4, …).
+  -- Keep only GPT-5.3 and GPT-5.4 variants.
   if provider == "gpt" then
     local filtered = {}
     for _, id in ipairs(ids) do
-      if id:match("^gpt%-") or id:match("^o%d") then
+      if id:match("^gpt%-5%.3") or id:match("^gpt%-5%.4") then
         table.insert(filtered, id)
       end
     end
@@ -212,11 +230,10 @@ local function call_ai(system_prompt, user_message)
 
   -- Build JSON payload and write to temp file to avoid all shell escaping pain
   local payload, url, headers
+  local sys = system_prompt:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
+  local usr = user_message:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
   if provider == "claude" then
     url = "https://api.anthropic.com/v1/messages"
-    -- Escape for JSON
-    local sys = system_prompt:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
-    local usr = user_message:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
     payload = '{"model":"' .. model .. '","max_tokens":1024,'
       .. '"system":"' .. sys .. '",'
       .. '"messages":[{"role":"user","content":"' .. usr .. '"}]}'
@@ -224,10 +241,18 @@ local function call_ai(system_prompt, user_message)
       "-H 'Content-Type: application/json' -H 'x-api-key: %s' -H 'anthropic-version: 2023-06-01'",
       api_key
     )
+  elseif provider == "perplexity" then
+    -- Perplexity exposes an OpenAI-compatible /chat/completions endpoint.
+    url = "https://api.perplexity.ai/chat/completions"
+    payload = '{"model":"' .. model .. '","max_tokens":1024,'
+      .. '"messages":[{"role":"system","content":"' .. sys .. '"},'
+      .. '{"role":"user","content":"' .. usr .. '"}]}'
+    headers = string.format(
+      "-H 'Content-Type: application/json' -H 'Authorization: Bearer %s'",
+      api_key
+    )
   else
     url = "https://api.openai.com/v1/chat/completions"
-    local sys = system_prompt:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
-    local usr = user_message:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\t', '\\t')
     payload = '{"model":"' .. model .. '","max_tokens":1024,'
       .. '"messages":[{"role":"system","content":"' .. sys .. '"},'
       .. '{"role":"user","content":"' .. usr .. '"}]}'
@@ -252,7 +277,8 @@ local function call_ai(system_prompt, user_message)
     return nil, "Empty response from API"
   end
 
-  -- Parse response
+  -- Parse response. Perplexity uses the same OpenAI-compatible shape,
+  -- so anything non-Claude reads from the `content` field.
   local text
   if provider == "claude" then
     text = body:match('"text"%s*:%s*"(.-)"')
@@ -429,7 +455,7 @@ pick_model = function(window, pane, on_done)
   local choices = {
     { id = "__refresh__", label = "↻  Refresh model list from API" },
   }
-  for _, provider in ipairs({ "claude", "gpt" }) do
+  for _, provider in ipairs(M.providers) do
     local has_key = get_api_key(provider) ~= nil
     local list = get_models(provider)
     local source = fetched_models[provider] and "live" or "fallback"
@@ -438,7 +464,7 @@ pick_model = function(window, pane, on_done)
       local suffix = has_key and ("   (" .. source .. ")") or "   (no api key)"
       table.insert(choices, {
         id = provider .. "|" .. model,
-        label = marker .. string.format("%-8s  %s%s", "[" .. provider .. "]", model, suffix),
+        label = marker .. string.format("%-12s  %s%s", "[" .. provider .. "]", model, suffix),
       })
     end
   end

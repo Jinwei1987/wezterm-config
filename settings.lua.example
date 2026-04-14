@@ -3,8 +3,9 @@
 
 return {
   -- ── API Keys ──────────────────────────────────────────────────
-  -- anthropic = "sk-ant-...",
-  -- openai = "sk-...",
+  -- anthropic  = "sk-ant-...",
+  -- openai     = "sk-...",
+  -- perplexity = "pplx-...",
 
   -- ── OTP ───────────────────────────────────────────────────────
   -- Shell command that prints an OTP code to stdout.
