@@ -253,7 +253,8 @@ local function call_ai(system_prompt, user_message)
     )
   else
     url = "https://api.openai.com/v1/chat/completions"
-    payload = '{"model":"' .. model .. '","max_tokens":1024,'
+    -- GPT-5.x only accepts `max_completion_tokens`; the legacy `max_tokens` is rejected.
+    payload = '{"model":"' .. model .. '","max_completion_tokens":1024,'
       .. '"messages":[{"role":"system","content":"' .. sys .. '"},'
       .. '{"role":"user","content":"' .. usr .. '"}]}'
     headers = string.format(
@@ -279,12 +280,29 @@ local function call_ai(system_prompt, user_message)
 
   -- Parse response. Perplexity uses the same OpenAI-compatible shape,
   -- so anything non-Claude reads from the `content` field.
-  local text
-  if provider == "claude" then
-    text = body:match('"text"%s*:%s*"(.-)"')
-  else
-    text = body:match('"content"%s*:%s*"(.-)"')
+  -- Walk the JSON string manually — Lua's lazy `.-` stops at the first `"`
+  -- even when it's an escaped `\"`, which truncates any reply containing a quote.
+  local function extract_json_string(src, key)
+    local _, e = src:find('"' .. key .. '"%s*:%s*"')
+    if not e then return nil end
+    local i = e + 1
+    local buf = {}
+    while i <= #src do
+      local c = src:sub(i, i)
+      if c == '\\' then
+        buf[#buf + 1] = src:sub(i, i + 1)
+        i = i + 2
+      elseif c == '"' then
+        return table.concat(buf)
+      else
+        buf[#buf + 1] = c
+        i = i + 1
+      end
+    end
+    return nil
   end
+
+  local text = extract_json_string(body, provider == "claude" and "text" or "content")
 
   if text then
     -- JSON string unescape. Hide escaped backslashes first so later passes
@@ -342,8 +360,6 @@ local function ai_command_suggest(window, pane)
     return
   end
 
-  show_result(window, "AI Command Suggest [" .. model_label .. "]", "Thinking... (this tab will update)")
-
   local response, err = call_ai(
     "You are a terminal command expert. The user shows terminal output (possibly errors). "
     .. "Suggest the best command(s) to fix it. Reply ONLY with commands, one per line. "
@@ -368,8 +384,6 @@ local function ai_explain_output(window, pane)
       "No text selected.\n\nHow to use:\n  1. Select some terminal output (click+drag or enter Copy Mode)\n  2. Press CMD+SHIFT+X")
     return
   end
-
-  show_result(window, "AI Explain [" .. model_label .. "]", "Thinking... (this tab will update)")
 
   local response, err = call_ai(
     "You are a helpful terminal assistant. Explain the following terminal output in plain English. "
