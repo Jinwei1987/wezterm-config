@@ -51,7 +51,7 @@ local shortcuts = {
   -- Launchers
   { keys = "CMD+SHIFT+S",        desc = "Snippet launcher (fuzzy search)" },
   { keys = "CMD+SHIFT+Z",        desc = "Manage user snippets (add / delete)" },
-  { keys = "CMD+SHIFT+H",        desc = "Host launcher (SSH/SFTP → tab or split)" },
+  { keys = "CMD+SHIFT+H",        desc = "Host launcher (SSH/SFTP → dir + target)" },
   { keys = "CMD+SHIFT+M",        desc = "This help — search all shortcuts" },
 }
 

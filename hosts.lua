@@ -2,7 +2,8 @@
 --  hosts.lua — SSH/SFTP Host Launcher for WezTerm
 --
 --  Reads ~/.ssh/config and provides a fuzzy picker to connect
---  via SSH or SFTP in a new tab. Tracks connections for tab titles.
+--  via SSH or SFTP in a new tab or split pane. Tracks connections for tab
+--  titles.
 --
 --  For both SSH and SFTP, offers a per-host remote directory history: picks
 --  from recently used dirs, lets you type a new one, or defaults to the
@@ -339,7 +340,8 @@ local function host_launcher(window, pane)
     return
   end
 
-  -- Build choices: each host gets an SSH and SFTP entry
+  -- Build choices: each host gets an SSH and SFTP entry. After selection,
+  -- the launcher asks for remote directory, then where to open it.
   local choices = {}
   for _, h in ipairs(hosts) do
     local display_info = h.hostname and ("  →  " .. h.hostname) or ""
@@ -366,7 +368,7 @@ local function host_launcher(window, pane)
       action = wezterm.action_callback(function(inner_window, inner_pane, id, _)
         if not id then return end
         local proto, name = id:match("^(%w+):(.+)$")
-        if not proto then return end
+        if not proto or not name then return end
         remote_dir_picker(inner_window, inner_pane, proto, name)
       end),
     }),

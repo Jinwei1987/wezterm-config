@@ -68,7 +68,7 @@ settings.lua      API keys, otp_command, curated snippets (NOT in repo, stays in
 | `CMD+SHIFT+N` | AI chat (multi-turn conversation) | ai.lua |
 | `CMD+SHIFT+S` | Snippet launcher | snippets.lua |
 | `CMD+SHIFT+Z` | Manage user snippets — add / delete (writes `user_snippets.lua`) | snippets.lua |
-| `CMD+SHIFT+H` | Host launcher (SSH/SFTP → tab or split) | hosts.lua |
+| `CMD+SHIFT+H` | Host launcher (SSH/SFTP → dir + target) | hosts.lua |
 | `CMD+SHIFT+M` | Shortcut help | help.lua |
 
 ## Known Gotchas
@@ -84,7 +84,7 @@ settings.lua      API keys, otp_command, curated snippets (NOT in repo, stays in
 - **Snippets live in their own module.** `snippets.lua` owns both the picker (CMD+SHIFT+S) and the add/delete manager (CMD+SHIFT+Z) — not `ai.lua`. Curated defaults come from `settings.snippets` (inside `~/.config/wezterm/settings.lua`, seeded from `settings.lua.example`). Dynamic adds go to a separate `~/.config/wezterm/user_snippets.lua` so we never rewrite the user's secrets file. `load_all_snippets()` merges both sources, clearing `package.loaded["settings"]` and `package.loaded["user_snippets"]` before each require so edits appear without a config reload. The "Delete existing" option is hidden from the menu when `user_snippets.lua` is empty.
 - **GPT-5.x rejects `max_tokens`.** The OpenAI branch of `call_ai` must send `max_completion_tokens` instead. Claude and Perplexity still use `max_tokens` — don't collapse the three branches.
 - **`show_result` spawns a fresh tab every call.** It's synchronous `less` on a temp file, so you can't pre-spawn a "Thinking…" placeholder and then update it — the second call creates a sibling tab, leaving a stale one behind. Call `show_result` exactly once, after the API response is in hand.
-- **Three chained `InputSelector`s drop the deepest callback.** Dispatching a third `InputSelector` via `window:perform_action` from inside a level-2 callback fires the action but silently never runs its `action_callback`. `wezterm.time.call_after` does not help. Flatten by baking choices into a single picker (see `hosts.lua`'s `remote_dir_picker` which combines dir × where-to-open). `PromptInputLine` at level 3 still works, so `__type__` can still prompt for free-form input.
+- **Three chained `InputSelector`s drop the deepest callback.** Dispatching a third `InputSelector` via `window:perform_action` from inside a level-2 callback fires the action but silently never runs its `action_callback`. `wezterm.time.call_after`, custom `EmitEvent`, and a level-3 `PromptInputLine` were also unreliable for this launcher on the current runtime. Flatten by baking choices into a single picker (see `hosts.lua`'s `remote_dir_picker` which combines dir × where-to-open).
 
 ## Adding a New Keybinding
 
