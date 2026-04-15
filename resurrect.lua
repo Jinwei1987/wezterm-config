@@ -33,8 +33,15 @@ local M = {}
 
 -- The plugin fetches from GitHub on first load; wrap in pcall so a network
 -- blip or API drift can't take down the rest of the config.
+--
+-- We point at our fork, which carries a fix for a null-pane crash in
+-- upstream's `pane_tree.lua:78` (`insert_panes` pushes the same
+-- PaneInformation into both right and bottom buckets when a pane is
+-- diagonally past the root's bottom-right corner; the right-branch pass
+-- nulls `.pane` and the bottom-branch pass then derefs nil). Upstream:
+-- https://github.com/MLFlexer/resurrect.wezterm
 local load_ok, resurrect = pcall(function()
-  return wezterm.plugin.require("https://github.com/MLFlexer/resurrect.wezterm")
+  return wezterm.plugin.require("https://github.com/Jinwei1987/resurrect.wezterm")
 end)
 if not load_ok or not resurrect then
   wezterm.log_error("resurrect.wezterm plugin failed to load: " .. tostring(resurrect))
