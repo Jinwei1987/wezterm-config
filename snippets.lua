@@ -94,11 +94,18 @@ local function snippet_launcher(window, pane)
     return
   end
 
+  local max_cmd_len = 80
   local choices = {}
   for _, s in ipairs(snippets) do
+    local cmd_preview = (s.command or ""):gsub("%s+", " ")
+    if #cmd_preview > max_cmd_len then
+      cmd_preview = cmd_preview:sub(1, max_cmd_len - 1) .. "…"
+    end
     table.insert(choices, {
       id = s.command,
-      label = s.label .. (s.desc and #s.desc > 0 and ("  —  " .. s.desc) or ""),
+      label = s.label
+        .. (s.desc and #s.desc > 0 and ("  —  " .. s.desc) or "")
+        .. "    [" .. cmd_preview .. "]",
     })
   end
 
