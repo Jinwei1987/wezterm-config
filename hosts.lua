@@ -19,6 +19,18 @@ local wezterm = require("wezterm")
 local state = require("state")
 local M = {}
 
+-- wezterm < 20250208 silently drops the deepest callback when 3
+-- `InputSelector`s are chained — fixed in wezterm/wezterm#6403 (merged
+-- 2025-02-08) by switching the new-overlay pane lookup from
+-- `get_active_pane_or_overlay()` to `get_active_pane_no_overlay()`.
+-- Newer builds get the natural host → dir → where-to-open flow; older
+-- builds fall back to the flat single-picker path.
+local function supports_nested_selectors()
+  local v = wezterm.version or ""
+  local date = tonumber(v:sub(1, 8))
+  return date ~= nil and date >= 20250208
+end
+
 -- ── Remote dir history (ssh + sftp) ──────────────────────────────────────
 
 local MAX_REMOTE_DIR_HISTORY = 15
@@ -166,11 +178,10 @@ end
 -- `spawn_args` is the argv table passed directly to execvp — no shell wrapper.
 -- The dir (if any) is already encoded in argv by `build_spawn_args`.
 --
--- `open_mode` is "tab" | "right" | "bottom". We used to dispatch a separate
--- InputSelector to ask this, but chaining a third InputSelector (host → dir
--- → open-where) silently drops the deepest callback in wezterm. So the
--- where-to-open choice is baked into the dir picker entries instead, and
--- open_connection just executes the choice without its own picker.
+-- `open_mode` is "tab" | "right" | "bottom". On older wezterm the where-to-open
+-- choice is baked into the dir picker entries (see `remote_dir_picker_flat`);
+-- on newer wezterm it comes from a dedicated third picker (`where_picker`).
+-- Either way, `open_connection` just executes the final choice.
 local function open_connection(window, pane, proto, name, open_mode, spawn_args)
   local function track(new_pane)
     if not new_pane then return end
@@ -221,13 +232,108 @@ local function build_spawn_args(proto, name, dir)
   return { "ssh", name }
 end
 
--- Show the dir picker for this (proto, host), then spawn directly.
+-- Third-step picker (nested path only): pick where to open the resolved
+-- (proto, host, dir). Used on wezterm ≥ 20250208 where chaining three
+-- InputSelectors no longer drops the deepest callback.
+local function where_picker(window, pane, proto, name, dir)
+  local choices = {
+    { id = "tab",    label = "📑  New Tab" },
+    { id = "right",  label = "➡   Split Right" },
+    { id = "bottom", label = "⬇   Split Down" },
+  }
+  local where_title = "  " .. proto:upper() .. " → " .. name
+    .. (dir and #dir > 0 and ("  " .. dir) or "")
+    .. "  (where to open)"
+  window:perform_action(
+    wezterm.action.InputSelector({
+      title = where_title,
+      choices = choices,
+      fuzzy = false,
+      action = wezterm.action_callback(function(w, p, open_mode)
+        if not open_mode then return end
+        if dir and #dir > 0 then
+          record_remote_dir(name, dir)
+        end
+        open_connection(w, p, proto, name, open_mode, build_spawn_args(proto, name, dir))
+      end),
+    }),
+    pane
+  )
+end
+
+-- Nested (three-step) dir picker: host → dir → where-to-open. Only safe on
+-- wezterm ≥ 20250208 (see `supports_nested_selectors`). The dir picker here
+-- lists Default / Type / history dirs + a sibling Remove entry per history
+-- dir; after a dir is chosen, `where_picker` handles the spawn target.
+local function remote_dir_picker_nested(window, pane, proto, name)
+  local history = get_remote_history(name)
+
+  local choices = {
+    { id = "default", label = "🏠  Default (remote home)" },
+    { id = "type",    label = "⌨   Type remote directory…" },
+  }
+  for _, d in ipairs(history) do
+    table.insert(choices, { id = "dir:" .. d, label = "📁  " .. d })
+  end
+  for _, d in ipairs(history) do
+    table.insert(choices, { id = "remove:" .. d, label = "🗑  Remove from history — " .. d })
+  end
+
+  window:perform_action(
+    wezterm.action.InputSelector({
+      title = "  " .. proto:upper() .. " → " .. name .. "  (pick remote dir)",
+      choices = choices,
+      fuzzy = true,
+      fuzzy_description = "Type to filter dirs:",
+      action = wezterm.action_callback(function(w, p, id)
+        if not id then return end
+
+        local rm = id:match("^remove:(.+)$")
+        if rm then
+          forget_remote_dir(name, rm)
+          pcall(function()
+            w:toast_notification("WezTerm",
+              "Removed '" .. rm .. "' from " .. name .. " history",
+              nil, 3000)
+          end)
+          return
+        end
+
+        if id == "default" then
+          where_picker(w, p, proto, name, nil)
+        elseif id == "type" then
+          w:perform_action(
+            wezterm.action.PromptInputLine({
+              description = wezterm.format({
+                { Attribute = { Intensity = "Bold" } },
+                { Foreground = { Color = "#a6e3a1" } },
+                { Text = "  " .. proto:upper() .. " " .. name .. " — remote directory to cd into:" },
+              }),
+              action = wezterm.action_callback(function(w2, p2, line)
+                if not line or #line == 0 then return end
+                where_picker(w2, p2, proto, name, line)
+              end),
+            }),
+            p
+          )
+        else
+          local d = id:match("^dir:(.+)$")
+          if d then
+            where_picker(w, p, proto, name, d)
+          end
+        end
+      end),
+    }),
+    pane
+  )
+end
+
+-- Flat dir picker (fallback for wezterm < 20250208): bakes the where-to-open
+-- choice into the dir picker so we never need a third chained InputSelector.
 --
 -- Each dir entry is expanded into 3 choices (new tab / split right / split
--- down) so the where-to-open decision is made in the same picker. We can't
--- dispatch a third InputSelector from this callback — wezterm silently drops
--- callbacks on the deepest picker when three are chained.
-local function remote_dir_picker(window, pane, proto, name)
+-- down); history entries also get a Remove variant.
+local function remote_dir_picker_flat(window, pane, proto, name)
   local history = get_remote_history(name)
 
   -- Base dir entries: { id, label }. `id` is either "__default__",
@@ -318,6 +424,14 @@ local function remote_dir_picker(window, pane, proto, name)
     }),
     pane
   )
+end
+
+-- Dispatcher: pick nested (3-step) on new wezterm, flat on old.
+local function remote_dir_picker(window, pane, proto, name)
+  if supports_nested_selectors() then
+    return remote_dir_picker_nested(window, pane, proto, name)
+  end
+  return remote_dir_picker_flat(window, pane, proto, name)
 end
 
 -- ── Host Launcher ────────────────────────────────────────────────────────
