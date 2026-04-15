@@ -52,6 +52,8 @@ local shortcuts = {
   { keys = "CMD+SHIFT+S",        desc = "Snippet launcher (fuzzy search)" },
   { keys = "CMD+SHIFT+Z",        desc = "Manage user snippets (add / delete)" },
   { keys = "CMD+SHIFT+H",        desc = "Host launcher (SSH/SFTP → dir + target)" },
+  { keys = "CMD+SHIFT+B",        desc = "Save current session (pane layout) now" },
+  { keys = "CMD+SHIFT+Y",        desc = "Restore saved session / pane layout" },
   { keys = "CMD+SHIFT+M",        desc = "This help — search all shortcuts" },
 }
 

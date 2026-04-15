@@ -13,6 +13,7 @@ wezterm.lua       Main config — appearance, keybindings, SSH tab title resolut
 │   └── user_snippets.lua    Dynamic snippets (NOT in repo, written by CMD+SHIFT+Z)
 ├── hosts.lua     SSH/SFTP host launcher — parses ~/.ssh/config
 │   └── remote_dirs.lua     Per-host remote dir history (NOT in repo, written by hosts.lua)
+├── resurrect.lua Session / pane layout persistence (wraps resurrect.wezterm plugin)
 └── help.lua      Searchable shortcut cheat sheet (hardcoded list — keep in sync!)
 
 settings.lua      API keys, otp_command, curated snippets (NOT in repo, stays in ~/.config/wezterm/)
@@ -69,6 +70,8 @@ settings.lua      API keys, otp_command, curated snippets (NOT in repo, stays in
 | `CMD+SHIFT+S` | Snippet launcher | snippets.lua |
 | `CMD+SHIFT+Z` | Manage user snippets — add / delete (writes `user_snippets.lua`) | snippets.lua |
 | `CMD+SHIFT+H` | Host launcher (SSH/SFTP → dir + target) | hosts.lua |
+| `CMD+SHIFT+B` | Save current session (pane layout) now | resurrect.lua |
+| `CMD+SHIFT+Y` | Restore saved session / pane layout | resurrect.lua |
 | `CMD+SHIFT+M` | Shortcut help | help.lua |
 
 ## Known Gotchas
@@ -85,6 +88,7 @@ settings.lua      API keys, otp_command, curated snippets (NOT in repo, stays in
 - **GPT-5.x rejects `max_tokens`.** The OpenAI branch of `call_ai` must send `max_completion_tokens` instead. Claude and Perplexity still use `max_tokens` — don't collapse the three branches.
 - **`show_result` spawns a fresh tab every call.** It's synchronous `less` on a temp file, so you can't pre-spawn a "Thinking…" placeholder and then update it — the second call creates a sibling tab, leaving a stale one behind. Call `show_result` exactly once, after the API response is in hand.
 - **Three chained `InputSelector`s drop the deepest callback.** Dispatching a third `InputSelector` via `window:perform_action` from inside a level-2 callback fires the action but silently never runs its `action_callback`. `wezterm.time.call_after`, custom `EmitEvent`, and a level-3 `PromptInputLine` were also unreliable for this launcher on the current runtime. Flatten by baking choices into a single picker (see `hosts.lua`'s `remote_dir_picker` which combines dir × where-to-open).
+- **`resurrect.wezterm` plugin API is unstable.** `resurrect.lua` wraps every plugin entrypoint in a `safe()` helper (pcall + log) because the plugin's module layout has drifted across releases (`state_manager` vs `save_state`, `workspace_state` vs `tab_state`, etc.). The plugin fetches from GitHub on first `wezterm.plugin.require` — first launch after a fresh install has a brief network stall. Restored panes re-spawn the original command; running processes and live shell state do NOT survive a restart, only cwd + launch command + optional scrollback-as-text.
 
 ## Adding a New Keybinding
 

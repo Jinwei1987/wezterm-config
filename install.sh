@@ -12,7 +12,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET_DIR="$HOME/.config/wezterm"
 
-FILES=(wezterm.lua ai.lua help.lua hosts.lua snippets.lua state.lua)
+FILES=(wezterm.lua ai.lua help.lua hosts.lua resurrect.lua snippets.lua state.lua)
 
 mkdir -p "$TARGET_DIR"
 
