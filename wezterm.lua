@@ -38,6 +38,8 @@ if not settings_ok then settings = {} end
 
 -- Use config_builder for clearer error messages on typos / bad values
 local config = wezterm.config_builder()
+config.ssh_backend = "LibSsh"
+config.ssh_domains = wezterm.default_ssh_domains()
 
 -- ==========================================================================
 --  1. APPEARANCE & THEME

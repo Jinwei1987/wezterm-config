@@ -2,14 +2,13 @@
 --  hosts.lua — SSH/SFTP Host Launcher for WezTerm
 --
 --  Reads ~/.ssh/config and provides a fuzzy picker to connect
---  via SSH or SFTP in a new tab or split pane. Tracks connections for tab
---  titles.
+--  via WezTerm's built-in SSH client or system sftp in a new tab or split
+--  pane. Tracks connections for tab titles.
 --
---  For both SSH and SFTP, offers a per-host remote directory history: picks
---  from recently used dirs, lets you type a new one, or defaults to the
---  remote home. History persists to ~/.config/wezterm/remote_dirs.lua
---  (not in repo) as `{ host = {…} }` — SSH and SFTP share the same list
---  per host. Old per-proto files are auto-migrated on load.
+--  For SFTP, offers a per-host remote directory history: picks from recently
+--  used dirs, lets you type a new one, or defaults to the remote home. History
+--  persists to ~/.config/wezterm/remote_dirs.lua (not in repo) as
+--  `{ host = {…} }`. Old per-proto files are auto-migrated on load.
 --
 --  Keybinding: CMD+SHIFT+H
 --  Usage: require("hosts").apply_to_config(config)
@@ -31,7 +30,7 @@ local function supports_nested_selectors()
   return date ~= nil and date >= 20250208
 end
 
--- ── Remote dir history (ssh + sftp) ──────────────────────────────────────
+-- ── Remote dir history (sftp) ────────────────────────────────────────────
 
 local MAX_REMOTE_DIR_HISTORY = 15
 
@@ -131,11 +130,6 @@ local function forget_remote_dir(host, dir)
   write_remote_dirs(all)
 end
 
--- Shell-quote for safe `zsh -c` — wraps in single quotes, escapes embedded ones.
-local function sh_quote(s)
-  return "'" .. s:gsub("'", "'\\''") .. "'"
-end
-
 -- ── Parse SSH Config ─────────────────────────────────────────────────────
 
 local function parse_ssh_hosts()
@@ -175,14 +169,15 @@ end
 
 -- ── Spawner (new tab / split right / split down) ────────────────────────
 
--- `spawn_args` is the argv table passed directly to execvp — no shell wrapper.
--- The dir (if any) is already encoded in argv by `build_spawn_args`.
+-- `spawn_cmd` is a SpawnCommand-like table passed to spawn_tab/pane:split.
+-- SSH uses WezTerm's built-in libssh-backed "SSH:<host>" domains. SFTP still
+-- uses the system sftp client because WezTerm doesn't expose SFTP as a domain.
 --
 -- `open_mode` is "tab" | "right" | "bottom". On older wezterm the where-to-open
 -- choice is baked into the dir picker entries (see `remote_dir_picker_flat`);
 -- on newer wezterm it comes from a dedicated third picker (`where_picker`).
 -- Either way, `open_connection` just executes the final choice.
-local function open_connection(window, pane, proto, name, open_mode, spawn_args)
+local function open_connection(window, pane, proto, name, open_mode, spawn_cmd)
   local function track(new_pane)
     if not new_pane then return end
     local pid_ok, pid = pcall(function() return new_pane:pane_id() end)
@@ -193,43 +188,55 @@ local function open_connection(window, pane, proto, name, open_mode, spawn_args)
 
   if open_mode == "tab" then
     local ok, _tab, new_pane = pcall(function()
-      return window:mux_window():spawn_tab({ args = spawn_args })
+      return window:mux_window():spawn_tab(spawn_cmd)
     end)
-    if ok then track(new_pane) end
+    if ok then
+      track(new_pane)
+    else
+      wezterm.log_error("Host launcher spawn_tab failed: " .. tostring(_tab))
+      pcall(function()
+        window:toast_notification("WezTerm", "Failed to open " .. proto .. "://" .. name, nil, 4000)
+      end)
+    end
   else
     local direction = open_mode == "right" and "Right" or "Bottom"
     local ok, new_pane = pcall(function()
-      return pane:split({ direction = direction, args = spawn_args })
+      spawn_cmd.direction = direction
+      return pane:split(spawn_cmd)
     end)
-    if ok then track(new_pane) end
+    if ok then
+      track(new_pane)
+    else
+      wezterm.log_error("Host launcher split failed: " .. tostring(new_pane))
+      pcall(function()
+        window:toast_notification("WezTerm", "Failed to open " .. proto .. "://" .. name, nil, 4000)
+      end)
+    end
   end
 end
 
--- ── Remote-dir picker (ssh + sftp) ───────────────────────────────────────
+-- ── Remote-dir picker (sftp) ─────────────────────────────────────────────
 
--- Build the argv to spawn for `proto` + host. Both protos encode the dir in
--- argv so the remote is already `cd`'d into it before the prompt appears.
+-- Build the command to spawn for `proto` + host.
 --
--- SSH: argv = { "ssh", "-t", host, "cd '<dir>' 2>/dev/null; exec ${SHELL:-/bin/bash} -l" }
---   `-t` forces a PTY, the outer single quotes keep the command one argv
---   entry, the inner single quotes are escaped so the remote shell sees
---   `cd 'dir'` literally, and `exec ${SHELL:-/bin/bash} -l` replaces the
---   wrapper with a login shell so it owns the PTY. Without a dir we fall
---   back to plain interactive ssh.
+-- SSH: uses WezTerm's auto-populated plain SSH domain for `Host name`, i.e.
+--   `SSH:<name>`. That path is backed by WezTerm's integrated SSH client and
+--   honors the parsed ~/.ssh/config entry. No remote cwd is applied for SSH.
 -- SFTP: argv = { "sftp", "host:<dir>" } — sftp(1) cds into the path before
 --   the prompt when the destination is given as `host:path`.
-local function build_spawn_args(proto, name, dir)
+local function build_spawn_command(proto, name, dir)
+  if proto == "ssh" then
+    return { domain = { DomainName = "SSH:" .. name } }
+  end
+
   if proto == "sftp" then
     if dir and #dir > 0 then
-      return { "sftp", name .. ":" .. dir }
+      return { args = { "sftp", name .. ":" .. dir } }
     end
-    return { "sftp", name }
+    return { args = { "sftp", name } }
   end
-  if dir and #dir > 0 then
-    local remote_cmd = "cd " .. sh_quote(dir) .. " 2>/dev/null; exec ${SHELL:-/bin/bash} -l"
-    return { "ssh", "-t", name, remote_cmd }
-  end
-  return { "ssh", name }
+
+  return { args = { proto, name } }
 end
 
 -- Third-step picker (nested path only): pick where to open the resolved
@@ -251,10 +258,10 @@ local function where_picker(window, pane, proto, name, dir)
       fuzzy = false,
       action = wezterm.action_callback(function(w, p, open_mode)
         if not open_mode then return end
-        if dir and #dir > 0 then
+        if proto == "sftp" and dir and #dir > 0 then
           record_remote_dir(name, dir)
         end
-        open_connection(w, p, proto, name, open_mode, build_spawn_args(proto, name, dir))
+        open_connection(w, p, proto, name, open_mode, build_spawn_command(proto, name, dir))
       end),
     }),
     pane
@@ -397,7 +404,7 @@ local function remote_dir_picker_flat(window, pane, proto, name)
           if dir and #dir > 0 then
             record_remote_dir(name, dir)
           end
-          open_connection(w, p, proto, name, open_mode, build_spawn_args(proto, name, dir))
+          open_connection(w, p, proto, name, open_mode, build_spawn_command(proto, name, dir))
         end
 
         if dir_id == "__default__" then
@@ -454,8 +461,8 @@ local function host_launcher(window, pane)
     return
   end
 
-  -- Build choices: each host gets an SSH and SFTP entry. After selection,
-  -- the launcher asks for remote directory, then where to open it.
+  -- Build choices: each host gets an SSH and SFTP entry. SSH opens directly
+  -- through WezTerm's built-in domain; SFTP asks for remote directory first.
   local choices = {}
   for _, h in ipairs(hosts) do
     local display_info = h.hostname and ("  →  " .. h.hostname) or ""
@@ -483,7 +490,11 @@ local function host_launcher(window, pane)
         if not id then return end
         local proto, name = id:match("^(%w+):(.+)$")
         if not proto or not name then return end
-        remote_dir_picker(inner_window, inner_pane, proto, name)
+        if proto == "ssh" then
+          where_picker(inner_window, inner_pane, proto, name, nil)
+        else
+          remote_dir_picker(inner_window, inner_pane, proto, name)
+        end
       end),
     }),
     pane
