@@ -170,13 +170,28 @@ end
 -- ── Spawner (new tab / split right / split down) ────────────────────────
 
 -- `spawn_cmd` is a SpawnCommand-like table passed to spawn_tab/pane:split.
--- SSH uses WezTerm's built-in libssh-backed "SSH:<host>" domains. SFTP still
--- uses the system sftp client because WezTerm doesn't expose SFTP as a domain.
+-- SSH first uses WezTerm's built-in libssh-backed "SSH:<host>" domains, then
+-- falls back to system ssh if the domain is missing (for hosts added after
+-- WezTerm loaded its config). SFTP uses the system sftp client because WezTerm
+-- doesn't expose SFTP as a domain.
 --
 -- `open_mode` is "tab" | "right" | "bottom". On older wezterm the where-to-open
 -- choice is baked into the dir picker entries (see `remote_dir_picker_flat`);
 -- on newer wezterm it comes from a dedicated third picker (`where_picker`).
 -- Either way, `open_connection` just executes the final choice.
+local function fallback_spawn_command(proto, name)
+  if proto == "ssh" then
+    return { args = { "ssh", name } }
+  end
+  return nil
+end
+
+local function toast(window, message, timeout_ms)
+  pcall(function()
+    window:toast_notification("WezTerm", message, nil, timeout_ms or 4000)
+  end)
+end
+
 local function open_connection(window, pane, proto, name, open_mode, spawn_cmd)
   local function track(new_pane)
     if not new_pane then return end
@@ -186,6 +201,23 @@ local function open_connection(window, pane, proto, name, open_mode, spawn_cmd)
     end
   end
 
+  local function maybe_fallback(open_fn, err)
+    local fallback = fallback_spawn_command(proto, name)
+    if not fallback then
+      return false, err
+    end
+
+    local fallback_ok, new_pane = open_fn(fallback)
+    if fallback_ok then
+      track(new_pane)
+      toast(window,
+        "Using system ssh for " .. name .. "; restart WezTerm to refresh SSH domains",
+        6000)
+      return true
+    end
+    return false, new_pane
+  end
+
   if open_mode == "tab" then
     local ok, _tab, new_pane = pcall(function()
       return window:mux_window():spawn_tab(spawn_cmd)
@@ -193,10 +225,16 @@ local function open_connection(window, pane, proto, name, open_mode, spawn_cmd)
     if ok then
       track(new_pane)
     else
-      wezterm.log_error("Host launcher spawn_tab failed: " .. tostring(_tab))
-      pcall(function()
-        window:toast_notification("WezTerm", "Failed to open " .. proto .. "://" .. name, nil, 4000)
-      end)
+      local fallback_ok, fallback_err = maybe_fallback(function(cmd)
+        local spawn_ok, _fallback_tab, fallback_pane = pcall(function()
+          return window:mux_window():spawn_tab(cmd)
+        end)
+        return spawn_ok, spawn_ok and fallback_pane or _fallback_tab
+      end, _tab)
+      if not fallback_ok then
+        wezterm.log_error("Host launcher spawn_tab failed: " .. tostring(fallback_err))
+        toast(window, "Failed to open " .. proto .. "://" .. name, 4000)
+      end
     end
   else
     local direction = open_mode == "right" and "Right" or "Bottom"
@@ -207,10 +245,17 @@ local function open_connection(window, pane, proto, name, open_mode, spawn_cmd)
     if ok then
       track(new_pane)
     else
-      wezterm.log_error("Host launcher split failed: " .. tostring(new_pane))
-      pcall(function()
-        window:toast_notification("WezTerm", "Failed to open " .. proto .. "://" .. name, nil, 4000)
-      end)
+      local fallback_ok, fallback_err = maybe_fallback(function(cmd)
+        cmd.direction = direction
+        local spawn_ok, fallback_pane = pcall(function()
+          return pane:split(cmd)
+        end)
+        return spawn_ok, fallback_pane
+      end, new_pane)
+      if not fallback_ok then
+        wezterm.log_error("Host launcher split failed: " .. tostring(fallback_err))
+        toast(window, "Failed to open " .. proto .. "://" .. name, 4000)
+      end
     end
   end
 end
@@ -221,7 +266,9 @@ end
 --
 -- SSH: uses WezTerm's auto-populated plain SSH domain for `Host name`, i.e.
 --   `SSH:<name>`. That path is backed by WezTerm's integrated SSH client and
---   honors the parsed ~/.ssh/config entry. No remote cwd is applied for SSH.
+--   honors the parsed ~/.ssh/config entry. If the domain isn't available yet,
+--   `open_connection` falls back to system ssh and asks for a restart. No
+--   remote cwd is applied for SSH.
 -- SFTP: argv = { "sftp", "host:<dir>" } — sftp(1) cds into the path before
 --   the prompt when the destination is given as `host:path`.
 local function build_spawn_command(proto, name, dir)
